@@ -12,7 +12,6 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("pegen", "src/main.zig");
-    exe.addPackagePath("parser-toolkit", "libs/parser-toolkit/src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
