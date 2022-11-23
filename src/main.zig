@@ -117,7 +117,7 @@ pub const PegParser = struct {
         try self.stream.consume(2);
     }
 
-    pub fn parse(self: *PegParser) ParseError!void {
+    pub fn parse(self: *PegParser) ParseError!PegResult {
         var peg = PegResult{
             .rules = .{},
         };
@@ -133,6 +133,7 @@ pub const PegParser = struct {
 
             try peg.rules.append(self.allocator, .{ .identifier = identifier, .expression = expr });
         }
+        return peg;
     }
 
     const ModChar = enum { none, optional, zero_or_more, one_or_more };
@@ -308,9 +309,10 @@ pub const PegParser = struct {
                         while (it.next()) |v| try list.append(self.allocator, v.key_ptr.*);
                     } else {
                         var i: u8 = 0;
-                        while (i <= 255) {
+                        while (true) : (i += 1) {
                             if (!validity_map.contains(i))
                                 try list.append(self.allocator, i);
+                            if (i == 255) break;
                         }
                     }
 
@@ -337,5 +339,7 @@ pub fn main() !void {
     defer allocator.free(data);
 
     var gen = PegParser.init(allocator, data);
-    std.log.info("{any}", .{gen.parse()});
+    const p = try gen.parse();
+    std.log.info("Printing", .{});
+    std.log.info("{any}", .{p});
 }
