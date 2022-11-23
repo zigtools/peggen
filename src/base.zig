@@ -1,13 +1,39 @@
 const std = @import("std");
 
-pub const GenerationContext = struct {
-    random: std.rand.Random,
-    depth: usize, // The deeper we go, the less deep we keep going
+pub const Stream = struct {
+    index: usize = 0,
+    buffer: []const u8,
 
-    pub fn randomBool(self: GenerationContext) void {
-        // 2^(-1 + x)
-        // 0.5, 1, 2, 4, 8, etc.
-        const thresh = @exp2(-1.0 + @intToFloat(f32, self.depth)) / (comptime @exp(5.0));
-        return self.random.float(f32) > thresh;
+    pub fn peek(self: *Stream, by: usize) error{EndOfStream}!u8 {
+        if (self.index + by >= self.buffer.len) return error.EndOfStream;
+        return self.buffer[self.index + by];
+    }
+
+    pub fn consume(self: *Stream, count: usize) error{EndOfStream}!void {
+        if (self.index + count >= self.buffer.len) return error.EndOfStream;
+        self.index += count;
+    }
+
+    pub fn sliceToEnd(self: *Stream) []const u8 {
+        return self.buffer[self.index..];
+    }
+
+    pub fn sliceBy(self: *Stream, count: usize) error{EndOfStream}![]const u8 {
+        if (self.index + count >= self.buffer.len) return error.EndOfStream;
+        return self.buffer[self.index .. self.index + count];
+    }
+
+    pub fn read(self: *Stream, count: usize) error{EndOfStream}![]const u8 {
+        const res = try self.sliceBy(count);
+        try self.consume(count);
+        return res;
     }
 };
+
+pub const LookaheadKind = enum { positive, negative };
+pub fn Lookahead(comptime T: type, comptime kind: LookaheadKind) type {
+    return struct {
+        pub const __T = T;
+        pub const __kind = kind;
+    };
+}

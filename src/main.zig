@@ -34,23 +34,60 @@ pub fn isIdentifierCharacter(char: u8) bool {
     return std.ascii.isAlphanumeric(char) or char == '_';
 }
 
-pub const Generator = struct {
+pub const PegResult = struct {
+    pub const Expression = struct {
+        pub const Body = union(enum) {
+            /// .
+            any,
+            identifier: []const u8,
+            /// "characters" 'characters'
+            string: []const u8,
+            /// [a-zA-Z_] [^0-9]
+            set: std.ArrayListUnmanaged(u8),
+            /// (abc def)
+            group: std.ArrayListUnmanaged(Expression),
+            /// abc / def / gej
+            select: std.ArrayListUnmanaged(Expression),
+        };
+
+        pub const Modifiers = struct {
+            optional: bool = false,
+            zero_or_more: bool = false,
+            one_or_more: bool = false,
+            positive_lookahead: bool = false,
+            negative_lookahead: bool = false,
+        };
+
+        body: Body,
+        modifiers: Modifiers,
+    };
+
+    pub const Rule = struct {
+        identifier: []const u8,
+        expression: Expression,
+    };
+
+    rules: std.ArrayListUnmanaged(Rule),
+};
+
+pub const PegParser = struct {
     allocator: std.mem.Allocator,
     stream: Stream,
-    iterator_index: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, data: []const u8) Generator {
+    pub const ParseError = error{ OutOfMemory, EndOfStream, UnexpectedToken };
+
+    pub fn init(allocator: std.mem.Allocator, data: []const u8) PegParser {
         return .{
             .allocator = allocator,
             .stream = Stream{ .buffer = data },
         };
     }
 
-    fn skipWhitespace(self: *Generator) error{EndOfStream}!void {
+    fn skipWhitespace(self: *PegParser) error{EndOfStream}!void {
         while (std.ascii.isWhitespace(try self.stream.peek(0))) try self.stream.consume(1);
     }
 
-    fn skipWhitespaceAndComments(self: *Generator) error{EndOfStream}!void {
+    fn skipWhitespaceAndComments(self: *PegParser) error{EndOfStream}!void {
         try self.skipWhitespace();
         while ((try self.stream.peek(0)) == '#') {
             try self.skipWhitespace();
@@ -60,7 +97,7 @@ pub const Generator = struct {
         try self.skipWhitespace();
     }
 
-    fn readIdentifier(self: *Generator) error{EndOfStream}!?[]const u8 {
+    fn readIdentifier(self: *PegParser) error{EndOfStream}!?[]const u8 {
         for (self.stream.sliceToEnd()) |c, i| {
             if (!std.ascii.isAlphanumeric(c) and c != '_') {
                 if (i == 0) return null;
@@ -73,45 +110,68 @@ pub const Generator = struct {
         return error.EndOfStream;
     }
 
-    fn discardArrow(self: *Generator) error{ UnexpectedToken, EndOfStream }!void {
+    fn discardArrow(self: *PegParser) error{ EndOfStream, UnexpectedToken }!void {
         if (!std.mem.eql(u8, "<-", try self.stream.sliceBy(2)))
             return error.UnexpectedToken;
 
         try self.stream.consume(2);
     }
 
-    pub fn generate(self: *Generator, writer: anytype) anyerror!void {
-        try writer.writeAll(@embedFile("base.zig"));
-
+    pub fn parse(self: *PegParser) ParseError!void {
+        var peg = PegResult{
+            .rules = .{},
+        };
         while (true) {
             self.skipWhitespaceAndComments() catch break;
-            var identifier = (self.readIdentifier() catch break) orelse return error.UnexpectedToken;
+            const identifier = (self.readIdentifier() catch break) orelse return error.UnexpectedToken;
             self.skipWhitespaceAndComments() catch break;
             try self.discardArrow();
-            try writer.print("pub fn {s}(writer: anytype, ctx: *GenerationContext) anyerror!void {{_ = .{{writer, random}};", .{std.zig.fmtId(identifier)});
-            self.expression(writer) catch |err| switch (err) {
+            const expr = self.expression(false) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
-            try writer.writeAll("}");
+
+            try peg.rules.append(self.allocator, .{ .identifier = identifier, .expression = expr });
         }
     }
 
-    fn expression(self: *Generator, writer: anytype) anyerror!void {
+    const ModChar = enum { none, optional, zero_or_more, one_or_more };
+
+    /// Consumes it if it exists
+    fn modChar(self: *PegParser) error{EndOfStream}!ModChar {
+        // Only assuming one at most is present
+        var mod_char = try self.stream.peek(0);
+        switch (mod_char) {
+            '?' => {
+                try self.stream.consume(1);
+                return .optional;
+            },
+            '*' => {
+                try self.stream.consume(1);
+                return .zero_or_more;
+            },
+            '+' => {
+                try self.stream.consume(1);
+                return .one_or_more;
+            },
+            else => return .none,
+        }
+    }
+
+    fn expression(self: *PegParser, single: bool) ParseError!PegResult.Expression {
         // a / b / c become three slash_bufs items
-        var slash_bufs = std.ArrayListUnmanaged(std.ArrayList(u8)){};
-        defer slash_bufs.deinit(self.allocator);
+        var expressions = std.ArrayListUnmanaged(PegResult.Expression){};
+        var expressions_kind: enum { group, select } = .group;
 
-        try slash_bufs.append(self.allocator, std.ArrayList(u8).init(self.allocator));
+        var li: usize = 0;
 
-        var slash_buf = &slash_bufs.items[slash_bufs.items.len - 1];
-
-        while (true) {
+        while (true) : (li += 1) {
+            if (single and li > 0) break;
             const index_initial = self.stream.index;
-            // Used to store the "body" before modifications a? would lead to a being stored
-            var buf = std.ArrayList(u8).init(self.allocator);
 
-            self.skipWhitespace() catch break;
+            var expr = PegResult.Expression{ .body = undefined, .modifiers = .{} };
+
+            self.skipWhitespaceAndComments() catch break;
 
             if (try self.readIdentifier()) |id| {
                 self.skipWhitespace() catch break;
@@ -119,69 +179,43 @@ pub const Generator = struct {
                     self.stream.index = index_initial;
                     break;
                 }
-                try buf.writer().print("try {s}(writer, ctx);", .{std.zig.fmtId(id)});
+                expr.body = .{ .identifier = id };
             } else {
                 var char = (try self.stream.read(1))[0];
                 switch (char) {
                     '(' => {
-                        try buf.writer().writeByte('{');
-                        try self.expression(buf.writer());
-                        self.skipWhitespace() catch break;
+                        expr = try self.expression(false);
                         self.skipWhitespaceAndComments() catch break;
-                        try buf.writer().writeByte('}');
                     },
                     ')' => {
                         break;
                     },
                     '[' => {
-                        try self.squareSet(buf.writer());
+                        expr.body = .{ .set = try self.squareSet() };
                     },
                     '!' => {
-                        try self.expression(std.io.null_writer);
+                        expr = try self.expression(true);
+                        expr.modifiers.negative_lookahead = true;
                     },
                     '.' => {
-                        try buf.writer().writeAll("try writer.writeByte(random.intRangeLessThan(u8, 32, 126));");
+                        expr.body = .{ .any = {} };
                     },
                     '"', '\'' => {
-                        try self.string(buf.writer(), if (char == '"') .double else .single);
-                    },
-                    '#' => {
-                        self.stream.index -= 1;
-                        break;
+                        var str = try self.string(if (char == '"') .double else .single);
+                        expr.body = .{ .string = str.toOwnedSlice(self.allocator) };
                     },
                     else => return error.UnexpectedToken,
                 }
             }
 
-            // Only assuming one at most is present
-            var mod_char = try self.stream.peek(0);
-            switch (mod_char) {
-                '?' => {
-                    try self.stream.consume(1);
-
-                    try slash_buf.writer().writeAll("if (ctx.randomBool()) {");
-                    try slash_buf.appendSlice(buf.items);
-                    try slash_buf.writer().writeAll("}");
-                },
-                '*' => {
-                    try self.stream.consume(1);
-
-                    try slash_buf.writer().print("var id{d}: usize = 0; const b{d} = ctx.random.intRangeAtMost(usize, 0, 128); while (id{d} < b{d}) : (id{d} += 1) {{", .{ self.iterator_index, self.iterator_index, self.iterator_index, self.iterator_index, self.iterator_index });
-                    self.iterator_index += 1;
-                    try slash_buf.appendSlice(buf.items);
-                    try slash_buf.writer().writeAll("}");
-                },
-                '+' => {
-                    try self.stream.consume(1);
-
-                    try slash_buf.writer().print("var id{d}: usize = 0; const b{d} = ctx.random.intRangeAtMost(usize, 0, 128); while (id{d} < b{d}) : (id{d} += 1) {{", .{ self.iterator_index, self.iterator_index, self.iterator_index, self.iterator_index, self.iterator_index });
-                    self.iterator_index += 1;
-                    try slash_buf.appendSlice(buf.items);
-                    try slash_buf.writer().writeAll("}");
-                },
-                else => {
-                    try slash_buf.appendSlice(buf.items);
-                },
+            while (true) {
+                var mod = try self.modChar();
+                switch (mod) {
+                    .none => break,
+                    .optional => expr.modifiers.optional = true,
+                    .zero_or_more => expr.modifiers.zero_or_more = true,
+                    .one_or_more => expr.modifiers.one_or_more = true,
+                }
             }
 
             self.skipWhitespaceAndComments() catch break;
@@ -189,26 +223,20 @@ pub const Generator = struct {
             var slash_char = try self.stream.peek(0);
             if (slash_char == '/') {
                 try self.stream.consume(1);
-                try slash_bufs.append(self.allocator, std.ArrayList(u8).init(self.allocator));
-                slash_buf = &slash_bufs.items[slash_bufs.items.len - 1];
+                expressions_kind = .select;
             }
         }
 
-        if (slash_bufs.items.len == 1) {
-            try writer.writeAll(slash_bufs.items[0].items);
-        } else {
-            try writer.print("switch (random.intRangeLessThan(usize, 0, {d})) {{", .{slash_bufs.items.len});
-            for (slash_bufs.items) |*z, i| {
-                try writer.print("{d} => {{", .{i});
-                try writer.writeAll(z.items);
-                try writer.writeAll("},");
-            }
-            try writer.writeAll("else => unreachable,");
-            try writer.writeAll("}");
-        }
+        if (expressions.items.len == 1) {
+            defer expressions.deinit(self.allocator);
+            return expressions.items[0];
+        } else return .{ .body = switch (expressions_kind) {
+            .group => .{ .group = expressions },
+            .select => .{ .select = expressions },
+        }, .modifiers = .{} };
     }
 
-    fn escapeToChar(self: *Generator) error{EndOfStream}!u8 {
+    fn escapeToChar(self: *PegParser) error{EndOfStream}!u8 {
         var first = (try self.stream.read(1))[0];
 
         return if (std.ascii.isDigit(first)) d: {
@@ -224,63 +252,72 @@ pub const Generator = struct {
         };
     }
 
-    fn charOrEscapeToChar(self: *Generator, char: u8) error{EndOfStream}!u8 {
+    fn charOrEscapeToChar(self: *PegParser, char: u8) error{EndOfStream}!u8 {
         return if (char == '\\') self.escapeToChar() else char;
     }
 
     const QuoteKind = enum(u8) { single = '\'', double = '"' };
-    fn string(self: *Generator, writer: anytype, quote_kind: QuoteKind) error{ OutOfMemory, EndOfStream }!void {
+    fn string(self: *PegParser, quote_kind: QuoteKind) ParseError!std.ArrayListUnmanaged(u8) {
         var string_buf = std.ArrayListUnmanaged(u8){};
-        defer string_buf.deinit(self.allocator);
 
         while (true) {
             const char = (try self.stream.read(1))[0];
 
             if (char == @enumToInt(quote_kind)) {
-                try writer.print("try writer.writeAll(\"{}\");", .{std.zig.fmtEscapes(string_buf.items)});
-                break;
+                return string_buf;
             }
 
             try string_buf.append(self.allocator, try self.charOrEscapeToChar(char));
         }
     }
 
-    fn squareSet(self: *Generator, writer: anytype) error{ OutOfMemory, EndOfStream }!void {
-        var validity_list = std.ArrayListUnmanaged(u8){};
-        defer validity_list.deinit(self.allocator);
+    fn squareSet(self: *PegParser) ParseError!std.ArrayListUnmanaged(u8) {
+        var validity_map = std.AutoArrayHashMapUnmanaged(u8, void){};
+        defer validity_map.deinit(self.allocator);
 
         var negate = false;
+        var last: u8 = 0;
 
         while (true) {
             const char = (try self.stream.read(1))[0];
+            defer last = char;
 
             if (char == '^') negate = true;
 
             switch (char) {
                 '-' => {
-                    if (validity_list.items.len == 0) {
-                        try validity_list.append(self.allocator, '-');
+                    if (validity_map.count() == 0) {
+                        try validity_map.put(self.allocator, '-', {});
                         continue;
                     }
-                    const start = validity_list.pop();
+                    const start = last;
                     const end_tok = (try self.stream.read(1))[0];
                     const end = try self.charOrEscapeToChar(end_tok);
 
                     var i: u8 = start;
                     while (i <= end) : (i += 1) {
-                        try validity_list.append(self.allocator, i);
+                        try validity_map.put(self.allocator, i, {});
                     }
                 },
                 ']' => {
+                    var list = std.ArrayListUnmanaged(u8){};
+                    try list.ensureTotalCapacity(self.allocator, if (!negate) (validity_map.count()) else (256 - validity_map.count()));
+
                     if (!negate) {
-                        try writer.writeAll("try writer.writeByte(\"");
-                        try writer.print("{}", .{std.zig.fmtEscapes(validity_list.items)});
-                        try writer.print("\"[random.intRangeLessThan(u8, 0, {d})]);", .{validity_list.items.len});
+                        var it = validity_map.iterator();
+                        while (it.next()) |v| try list.append(self.allocator, v.key_ptr.*);
+                    } else {
+                        var i: u8 = 0;
+                        while (i <= 255) {
+                            if (!validity_map.contains(i))
+                                try list.append(self.allocator, i);
+                        }
                     }
-                    break;
+
+                    return list;
                 },
                 else => {
-                    try validity_list.append(self.allocator, try self.charOrEscapeToChar(char));
+                    try validity_map.put(self.allocator, try self.charOrEscapeToChar(char), {});
                 },
             }
         }
@@ -299,13 +336,6 @@ pub fn main() !void {
     var data = try grammar.readToEndAlloc(allocator, 50_000);
     defer allocator.free(data);
 
-    var writer = out.writer();
-    var gen = Generator.init(allocator, data);
-    gen.generate(writer) catch |err| switch (err) {
-        error.UnexpectedToken => {
-            std.log.err("{d}: {c}", .{ gen.stream.index, gen.stream.buffer[gen.stream.index] });
-            return err;
-        },
-        else => return err,
-    };
+    var gen = PegParser.init(allocator, data);
+    std.log.info("{any}", .{gen.parse()});
 }
