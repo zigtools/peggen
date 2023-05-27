@@ -31,8 +31,7 @@ Grammar		<- Spacing Definition+ EndOfFile
 
 Definition	<- Identifier
 		     LEFTARROW Expression
-Expression	<- Sequence (SLASH Sequence	
-			    )*
+Expression	<- Sequence (SLASH Sequence)*
 Sequence	<- Prefix (Prefix)* /
 Prefix		<- AND Action
 		 / AND Suffix

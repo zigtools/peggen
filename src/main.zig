@@ -62,9 +62,23 @@ pub const Expression = struct {
         negative,
     };
 
+    lookahead: Lookahead = .none,
     body: Body,
     modifier: Modifier = .none,
-    lookahead: Lookahead = .none,
+
+    fn simplify(expr: *Expression, allocator: std.mem.Allocator) void {
+        switch (expr.body) {
+            .group, .select => |*entries| {
+                if (entries.items.len == 1 and expr.lookahead == .none and expr.modifier == .none) {
+                    const single = entries.items[0];
+                    entries.deinit(allocator);
+                    expr.* = single;
+                    expr.simplify(allocator);
+                }
+            },
+            else => {},
+        }
+    }
 
     pub fn format(expr: Expression, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = options;
@@ -172,7 +186,7 @@ pub const PegParser = struct {
             const identifier = (self.readIdentifier() catch break) orelse return error.UnexpectedToken;
             self.skipWhitespaceAndComments() catch break;
             try self.discardArrow();
-            const expr = self.expression(false) catch |err| switch (err) {
+            const expr = self.expression() catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
@@ -203,93 +217,114 @@ pub const PegParser = struct {
         }
     }
 
-    fn expression(self: *PegParser, single: bool) ParseError!Expression {
-        // a / b / c become three slash_bufs items
-        var expressions = std.ArrayListUnmanaged(Expression){};
-        var expressions_kind: enum { group, select } = .group;
+    fn singleExpression(self: *PegParser) ParseError!?Expression {
+        const index_initial = self.stream.index;
 
-        var li: usize = 0;
+        var expr = Expression{ .body = undefined };
 
-        while (true) : (li += 1) {
-            if (single and li > 0) break;
-            const index_initial = self.stream.index;
+        try self.skipWhitespaceAndComments();
 
-            var expr = Expression{ .body = undefined };
-
-            self.skipWhitespaceAndComments() catch break;
-
-            if (try self.readIdentifier()) |id| {
-                self.skipWhitespace() catch break;
-                if (std.mem.eql(u8, "<-", try self.stream.sliceBy(2))) {
-                    self.stream.index = index_initial;
-                    break;
-                }
-                expr.body = .{ .identifier = id };
-            } else {
-                var char = (try self.stream.read(1))[0];
-                switch (char) {
-                    '(' => {
-                        expr = try self.expression(false);
-                        self.skipWhitespaceAndComments() catch break;
-                    },
-                    ')' => {
-                        break;
-                    },
-                    '[' => {
-                        expr.body = .{ .set = try self.squareSet() };
-                    },
-                    '&' => {
-                        expr = try self.expression(true);
-                        if (expr.lookahead != .none)
-                            return error.UnexpectedToken;
-                        expr.lookahead = .positive;
-                    },
-                    '!' => {
-                        expr = try self.expression(true);
-                        if (expr.lookahead != .none)
-                            return error.UnexpectedToken;
-                        expr.lookahead = .negative;
-                    },
-                    '.' => {
-                        expr.body = .{ .any = {} };
-                    },
-                    '"', '\'' => {
-                        var str = try self.string(if (char == '"') .double else .single);
-                        expr.body = .{ .string = try str.toOwnedSlice(self.allocator) };
-                    },
-                    else => return error.UnexpectedToken,
-                }
+        if (try self.readIdentifier()) |id| {
+            try self.skipWhitespace();
+            if (std.mem.eql(u8, "<-", try self.stream.sliceBy(2))) {
+                self.stream.index = index_initial;
+                return null;
             }
-
-            var mod = try self.modChar();
-            switch (mod) {
-                .none => {},
-                else => {
-                    expr.modifier = mod;
-                    if (try self.modChar() != .none)
+            expr.body = .{ .identifier = id };
+        } else {
+            var char = (try self.stream.read(1))[0];
+            switch (char) {
+                '(' => {
+                    expr = try self.expression();
+                    try self.skipWhitespaceAndComments();
+                },
+                ')' => {
+                    self.stream.index -= 1;
+                    return null;
+                },
+                '[' => {
+                    expr.body = .{ .set = try self.squareSet() };
+                },
+                '&' => {
+                    expr = try self.singleExpression() orelse return null;
+                    if (expr.lookahead != .none)
                         return error.UnexpectedToken;
+                    expr.lookahead = .positive;
+                },
+                '!' => {
+                    expr = try self.singleExpression() orelse return null;
+                    if (expr.lookahead != .none)
+                        return error.UnexpectedToken;
+                    expr.lookahead = .negative;
+                },
+                '.' => {
+                    expr.body = .{ .any = {} };
+                },
+                '"', '\'' => {
+                    var str = try self.string(if (char == '"') .double else .single);
+                    expr.body = .{ .string = try str.toOwnedSlice(self.allocator) };
+                },
+                else => {
+                    std.log.err("Unexpected character '{c}' @ {d}", .{ char, self.stream.index });
+                    return error.UnexpectedToken;
                 },
             }
 
-            self.skipWhitespaceAndComments() catch break;
+            if (char == '(') {
+                try self.skipWhitespaceAndComments();
+                if ((try self.stream.read(1))[0] != ')')
+                    return error.UnexpectedToken;
+            }
+        }
+
+        var mod = try self.modChar();
+        switch (mod) {
+            .none => {},
+            else => {
+                expr.modifier = mod;
+                if (try self.modChar() != .none)
+                    return error.UnexpectedToken;
+            },
+        }
+
+        try self.skipWhitespaceAndComments();
+
+        return expr;
+    }
+
+    fn expression(self: *PegParser) ParseError!Expression {
+        var group = std.ArrayListUnmanaged(Expression){};
+        var selections = std.ArrayListUnmanaged(Expression){};
+
+        while (true) {
+            var expr = try self.singleExpression() orelse {
+                try selections.append(self.allocator, .{
+                    .body = .{
+                        .group = try group.clone(self.allocator),
+                    },
+                });
+                break;
+            };
+            try group.append(self.allocator, expr);
 
             var slash_char = try self.stream.peek(0);
             if (slash_char == '/') {
                 try self.stream.consume(1);
-                expressions_kind = .select;
-            }
 
-            try expressions.append(self.allocator, expr);
+                try selections.append(self.allocator, .{
+                    .body = .{
+                        .group = try group.clone(self.allocator),
+                    },
+                });
+                group.items.len = 0;
+            }
         }
 
-        if (expressions.items.len == 1) {
-            const first = expressions.items[0];
-            expressions.deinit(self.allocator);
-            return first;
-        } else return .{ .body = switch (expressions_kind) {
-            .group => .{ .group = expressions },
-            .select => .{ .select = expressions },
-        } };
+        var expr = Expression{
+            .body = .{ .select = selections },
+        };
+        expr.simplify(self.allocator);
+        return expr;
     }
 
     fn escapeToChar(self: *PegParser) error{EndOfStream}!u8 {
