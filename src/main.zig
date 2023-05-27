@@ -74,6 +74,10 @@ pub const Expression = struct {
                     entries.deinit(allocator);
                     expr.* = single;
                     expr.simplify(allocator);
+                } else {
+                    for (entries.items) |*entry| {
+                        entry.simplify(allocator);
+                    }
                 }
             },
             else => {},
@@ -84,30 +88,36 @@ pub const Expression = struct {
         _ = options;
         _ = fmt;
 
+        switch (expr.lookahead) {
+            .none => {},
+            .positive => try writer.writeAll("grammar.positive("),
+            .negative => try writer.writeAll("grammar.negative("),
+        }
+
         switch (expr.modifier) {
             .none => {},
-            .optional => try writer.writeAll("modifiers.optional("),
-            .zero_or_more => try writer.writeAll("modifiers.zeroOrMore("),
-            .one_or_more => try writer.writeAll("modifiers.oneOrMore("),
+            .optional => try writer.writeAll("grammar.optional("),
+            .zero_or_more => try writer.writeAll("grammar.zeroOrMore("),
+            .one_or_more => try writer.writeAll("grammar.oneOrMore("),
         }
 
         switch (expr.body) {
-            .any => try writer.writeAll("rules.any()"),
+            .any => try writer.writeAll("grammar.any()"),
             .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
             .string => |str| try writer.print("\"{}\"", .{std.zig.fmtEscapes(str)}),
             .set => |set| {
                 _ = set;
-                try writer.writeAll("rules.set(.{})");
+                try writer.writeAll("grammar.set(.{})");
             },
             .group => |group| {
-                try writer.writeAll("rules.group(.{");
+                try writer.writeAll("grammar.group(.{");
                 for (group.items) |sub_expr| {
                     try writer.print("{},", .{sub_expr});
                 }
                 try writer.writeAll("})");
             },
             .select => |select| {
-                try writer.writeAll("rules.select(.{");
+                try writer.writeAll("grammar.select(.{");
                 for (select.items) |sub_expr| {
                     try writer.print("{},", .{sub_expr});
                 }
@@ -116,6 +126,11 @@ pub const Expression = struct {
         }
 
         switch (expr.modifier) {
+            .none => {},
+            else => try writer.writeAll(")"),
+        }
+
+        switch (expr.lookahead) {
             .none => {},
             else => try writer.writeAll(")"),
         }
@@ -427,8 +442,14 @@ pub const PegParser = struct {
 };
 
 pub fn generate(result: PegResult, writer: anytype) !void {
+    try writer.writeAll(
+        \\const grammar = @import("peggen").grammar;
+        \\
+        \\
+    );
+
     for (result.rules.items) |rule| {
-        try writer.print("const {} = {};\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
+        try writer.print("const {} = {};\n\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
     }
 }
 
