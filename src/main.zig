@@ -98,11 +98,10 @@ pub const PegParser = struct {
     }
 
     fn readIdentifier(self: *PegParser) error{EndOfStream}!?[]const u8 {
-        for (self.stream.sliceToEnd()) |c, i| {
+        for (self.stream.sliceToEnd(), 0..) |c, i| {
             if (!std.ascii.isAlphanumeric(c) and c != '_') {
                 if (i == 0) return null;
                 const id = try self.stream.read(i);
-                std.log.info("Identifier: {s}", .{id});
                 return id;
             }
         }
@@ -203,7 +202,7 @@ pub const PegParser = struct {
                     },
                     '"', '\'' => {
                         var str = try self.string(if (char == '"') .double else .single);
-                        expr.body = .{ .string = str.toOwnedSlice(self.allocator) };
+                        expr.body = .{ .string = try str.toOwnedSlice(self.allocator) };
                     },
                     else => return error.UnexpectedToken,
                 }
@@ -241,13 +240,23 @@ pub const PegParser = struct {
         var first = (try self.stream.read(1))[0];
 
         return if (std.ascii.isDigit(first)) d: {
+            var start = self.stream.index - 1;
+            while (std.ascii.isDigit((try self.stream.read(1))[0])) {}
             self.stream.index -= 1;
-            break :d std.fmt.parseInt(u8, try self.stream.read(3), 8) catch @panic("bruh");
+            break :d std.fmt.parseInt(u8, self.stream.buffer[start..self.stream.index], 8) catch @panic("bruh");
         } else switch (first) {
+            'a' => 0x07,
+            'b' => 0x08,
+            'e' => 0x1B,
+            'f' => 0x0C,
             'n' => '\n',
+            'r' => '\r',
             't' => '\t',
-            '"' => '"',
+            'v' => 0x0B,
             '\'' => '\'',
+            '"' => '"',
+            '[' => '[',
+            ']' => ']',
             '\\' => '\\',
             else => unreachable,
         };
@@ -332,7 +341,7 @@ pub fn main() !void {
     var out = try std.fs.cwd().createFile("out.zig", .{});
     defer out.close();
 
-    var grammar = try std.fs.cwd().openFile("grammar.y", .{});
+    var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
     defer grammar.close();
 
     var data = try grammar.readToEndAlloc(allocator, 50_000);

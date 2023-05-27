@@ -1,0 +1,81 @@
+# Copyright (c) 2007-2013, Ian Piumarta
+# All rights reserved.
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the 'Software'), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, and/or sell copies of the
+# Software, and to permit persons to whom the Software is furnished to do so,
+# provided that the above copyright notice(s) and this permission notice appear
+# in all copies or substantial portions of the Software.  Inclusion of the
+# above copyright notice(s) and this permission notice in supporting
+# documentation would be appreciated but is not required.
+# 
+# THE SOFTWARE IS PROVIDED 'AS IS'.  USE ENTIRELY AT YOUR OWN RISK.
+#
+# PE Grammar for PE Grammars
+# 
+# Adapted from [1] by Ian Piumarta <first-name at last-name point com>.
+# 
+# Best viewed using 140 columns monospaced with tabs every 8.
+# 
+# [1] Bryan Ford.  "Parsing Expression Grammars: A Recognition-Based Syntactic
+#     Foundation."  Symposium on Principles of Programming Languages,
+#     January 14--16, 2004, Venice, Italy.
+# 
+# Last edited: 2016-07-15 10:27:27 by piumarta on zora
+
+# Hierarchical syntax
+
+Grammar		<- Spacing Definition+ EndOfFile
+
+Definition	<- Identifier
+		     LEFTARROW Expression
+Expression	<- Sequence (SLASH Sequence	
+			    )*
+Sequence	<- Prefix (Prefix
+			  )*
+		 /
+Prefix		<- AND Action
+		 / AND Suffix
+		 / NOT Suffix
+		 /     Suffix
+Suffix		<- Primary (QUESTION
+			     / STAR
+			     / PLUS
+			   )?
+Primary		<- Identifier !LEFTARROW
+		 / OPEN Expression CLOSE
+		 / Literal
+		 / Class
+		 / DOT
+
+# Lexical syntax
+
+Identifier	<- IdentStart IdentCont* Spacing
+IdentStart	<- [a-zA-Z_]
+IdentCont	<- IdentStart / [0-9]
+Literal		<- ['] (!['] Char )* ['] Spacing
+		 / ["] (!["] Char )* ["] Spacing
+Class		<- '[' (!']' Range)* ']' Spacing
+Range		<- Char '-' Char / Char
+Char		<- '\\' [abefnrtv'"\[\]\\]
+		 / '\\' [0-3][0-7][0-7]
+		 / '\\' [0-7][0-7]?
+		 / '\\' '-'
+		 / !'\\' .
+LEFTARROW	<- '<-' Spacing
+SLASH		<- '/' Spacing
+AND		<- '&' Spacing
+NOT		<- '!' Spacing
+QUESTION	<- '?' Spacing
+STAR		<- '*' Spacing
+PLUS		<- '+' Spacing
+OPEN		<- '(' Spacing
+CLOSE		<- ')' Spacing
+DOT		<- '.' Spacing
+Spacing		<- (Space / Comment)*
+Comment		<- '#' (!EndOfLine .)* EndOfLine
+Space		<- ' ' / '\t' / EndOfLine
+EndOfLine	<- '\r\n' / '\n' / '\r'
+EndOfFile	<- !.
