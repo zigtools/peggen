@@ -34,39 +34,86 @@ pub fn isIdentifierCharacter(char: u8) bool {
     return std.ascii.isAlphanumeric(char) or char == '_';
 }
 
-pub const PegResult = struct {
-    pub const Expression = struct {
-        pub const Body = union(enum) {
-            /// .
-            any,
-            identifier: []const u8,
-            /// "characters" 'characters'
-            string: []const u8,
-            /// [a-zA-Z_] [^0-9]
-            set: std.ArrayListUnmanaged(u8),
-            /// (abc def)
-            group: std.ArrayListUnmanaged(Expression),
-            /// abc / def / gej
-            select: std.ArrayListUnmanaged(Expression),
-        };
-
-        pub const Modifiers = struct {
-            optional: bool = false,
-            zero_or_more: bool = false,
-            one_or_more: bool = false,
-            positive_lookahead: bool = false,
-            negative_lookahead: bool = false,
-        };
-
-        body: Body,
-        modifiers: Modifiers,
-    };
-
-    pub const Rule = struct {
+pub const Expression = struct {
+    pub const Body = union(enum) {
+        /// .
+        any,
         identifier: []const u8,
-        expression: Expression,
+        /// "characters" 'characters'
+        string: []const u8,
+        /// [a-zA-Z_] [^0-9]
+        set: std.ArrayListUnmanaged(u8),
+        /// (abc def)
+        group: std.ArrayListUnmanaged(Expression),
+        /// abc / def / gej
+        select: std.ArrayListUnmanaged(Expression),
     };
 
+    pub const Modifier = enum {
+        none,
+        optional,
+        zero_or_more,
+        one_or_more,
+    };
+
+    pub const Lookahead = enum {
+        none,
+        positive,
+        negative,
+    };
+
+    body: Body,
+    modifier: Modifier = .none,
+    lookahead: Lookahead = .none,
+
+    pub fn format(expr: Expression, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+        _ = fmt;
+
+        switch (expr.modifier) {
+            .none => {},
+            .optional => try writer.writeAll("modifiers.optional("),
+            .zero_or_more => try writer.writeAll("modifiers.zeroOrMore("),
+            .one_or_more => try writer.writeAll("modifiers.oneOrMore("),
+        }
+
+        switch (expr.body) {
+            .any => try writer.writeAll("rules.any()"),
+            .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
+            .string => |str| try writer.print("\"{}\"", .{std.zig.fmtEscapes(str)}),
+            .set => |set| {
+                _ = set;
+                try writer.writeAll("rules.set(.{})");
+            },
+            .group => |group| {
+                try writer.writeAll("rules.group(.{");
+                for (group.items) |sub_expr| {
+                    try writer.print("{},", .{sub_expr});
+                }
+                try writer.writeAll("})");
+            },
+            .select => |select| {
+                try writer.writeAll("rules.select(.{");
+                for (select.items) |sub_expr| {
+                    try writer.print("{},", .{sub_expr});
+                }
+                try writer.writeAll("})");
+            },
+        }
+
+        switch (expr.modifier) {
+            .none => {},
+            else => try writer.writeAll(")"),
+        }
+    }
+};
+
+pub const Rule = struct {
+    identifier: []const u8,
+    expression: Expression,
+};
+
+pub const PegResult = struct {
     rules: std.ArrayListUnmanaged(Rule),
 };
 
@@ -135,10 +182,8 @@ pub const PegParser = struct {
         return peg;
     }
 
-    const ModChar = enum { none, optional, zero_or_more, one_or_more };
-
     /// Consumes it if it exists
-    fn modChar(self: *PegParser) error{EndOfStream}!ModChar {
+    fn modChar(self: *PegParser) error{EndOfStream}!Expression.Modifier {
         // Only assuming one at most is present
         var mod_char = try self.stream.peek(0);
         switch (mod_char) {
@@ -158,9 +203,9 @@ pub const PegParser = struct {
         }
     }
 
-    fn expression(self: *PegParser, single: bool) ParseError!PegResult.Expression {
+    fn expression(self: *PegParser, single: bool) ParseError!Expression {
         // a / b / c become three slash_bufs items
-        var expressions = std.ArrayListUnmanaged(PegResult.Expression){};
+        var expressions = std.ArrayListUnmanaged(Expression){};
         var expressions_kind: enum { group, select } = .group;
 
         var li: usize = 0;
@@ -169,7 +214,7 @@ pub const PegParser = struct {
             if (single and li > 0) break;
             const index_initial = self.stream.index;
 
-            var expr = PegResult.Expression{ .body = undefined, .modifiers = .{} };
+            var expr = Expression{ .body = undefined };
 
             self.skipWhitespaceAndComments() catch break;
 
@@ -193,9 +238,17 @@ pub const PegParser = struct {
                     '[' => {
                         expr.body = .{ .set = try self.squareSet() };
                     },
+                    '&' => {
+                        expr = try self.expression(true);
+                        if (expr.lookahead != .none)
+                            return error.UnexpectedToken;
+                        expr.lookahead = .positive;
+                    },
                     '!' => {
                         expr = try self.expression(true);
-                        expr.modifiers.negative_lookahead = true;
+                        if (expr.lookahead != .none)
+                            return error.UnexpectedToken;
+                        expr.lookahead = .negative;
                     },
                     '.' => {
                         expr.body = .{ .any = {} };
@@ -208,14 +261,14 @@ pub const PegParser = struct {
                 }
             }
 
-            while (true) {
-                var mod = try self.modChar();
-                switch (mod) {
-                    .none => break,
-                    .optional => expr.modifiers.optional = true,
-                    .zero_or_more => expr.modifiers.zero_or_more = true,
-                    .one_or_more => expr.modifiers.one_or_more = true,
-                }
+            var mod = try self.modChar();
+            switch (mod) {
+                .none => {},
+                else => {
+                    expr.modifier = mod;
+                    if (try self.modChar() != .none)
+                        return error.UnexpectedToken;
+                },
             }
 
             self.skipWhitespaceAndComments() catch break;
@@ -225,15 +278,18 @@ pub const PegParser = struct {
                 try self.stream.consume(1);
                 expressions_kind = .select;
             }
+
+            try expressions.append(self.allocator, expr);
         }
 
         if (expressions.items.len == 1) {
-            defer expressions.deinit(self.allocator);
-            return expressions.items[0];
+            const first = expressions.items[0];
+            expressions.deinit(self.allocator);
+            return first;
         } else return .{ .body = switch (expressions_kind) {
             .group => .{ .group = expressions },
             .select => .{ .select = expressions },
-        }, .modifiers = .{} };
+        } };
     }
 
     fn escapeToChar(self: *PegParser) error{EndOfStream}!u8 {
@@ -335,6 +391,12 @@ pub const PegParser = struct {
     }
 };
 
+pub fn generate(result: PegResult, writer: anytype) !void {
+    for (result.rules.items) |rule| {
+        try writer.print("const {} = {};\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
+    }
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -349,6 +411,6 @@ pub fn main() !void {
 
     var gen = PegParser.init(allocator, data);
     const p = try gen.parse();
-    std.log.info("Printing", .{});
-    std.log.info("{any}", .{p});
+
+    try generate(p, out.writer());
 }
