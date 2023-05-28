@@ -35,6 +35,13 @@ pub fn isIdentifierCharacter(char: u8) bool {
 }
 
 pub const Expression = struct {
+    pub const Set = struct {
+        pub const Kind = enum { positive, negative };
+
+        kind: Kind = .positive,
+        values: std.ArrayListUnmanaged(u8),
+    };
+
     pub const Body = union(enum) {
         /// .
         any,
@@ -42,7 +49,7 @@ pub const Expression = struct {
         /// "characters" 'characters'
         string: []const u8,
         /// [a-zA-Z_] [^0-9]
-        set: std.ArrayListUnmanaged(u8),
+        set: Set,
         /// (abc def)
         group: std.ArrayListUnmanaged(Expression),
         /// abc / def / gej
@@ -106,8 +113,20 @@ pub const Expression = struct {
             .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
             .string => |str| try writer.print("\"{}\"", .{std.zig.fmtEscapes(str)}),
             .set => |set| {
-                _ = set;
-                try writer.writeAll("grammar.set(.{})");
+                switch (set.kind) {
+                    .positive => {
+                        try writer.writeAll("grammar.anyOf(.{");
+                    },
+                    .negative => {
+                        try writer.writeAll("grammar.noneOf(.{");
+                    },
+                }
+
+                for (set.values.items) |val| {
+                    try writer.print("'{'}',", .{std.zig.fmtEscapes(&.{val})});
+                }
+
+                try writer.writeAll("})");
             },
             .group => |group| {
                 try writer.writeAll("grammar.group(.{");
@@ -388,54 +407,38 @@ pub const PegParser = struct {
         }
     }
 
-    fn squareSet(self: *PegParser) ParseError!std.ArrayListUnmanaged(u8) {
-        var validity_map = std.AutoArrayHashMapUnmanaged(u8, void){};
-        defer validity_map.deinit(self.allocator);
+    fn squareSet(self: *PegParser) ParseError!Expression.Set {
+        var set = Expression.Set{ .values = std.ArrayListUnmanaged(u8){} };
+        var index: u8 = 0;
 
-        var negate = false;
-        var last: u8 = 0;
+        while (true) : (index += 1) {
+            const orig_char = (try self.stream.read(1))[0];
+            const char = try self.charOrEscapeToChar(orig_char);
 
-        while (true) {
-            const char = (try self.stream.read(1))[0];
-            defer last = char;
+            if (char == '^' and index == 0) {
+                set.kind = .negative;
+                continue;
+            }
 
-            if (char == '^') negate = true;
+            if (try self.stream.peek(0) == '-') {
+                try self.stream.consume(1);
 
-            switch (char) {
-                '-' => {
-                    if (validity_map.count() == 0) {
-                        try validity_map.put(self.allocator, '-', {});
-                        continue;
-                    }
-                    const start = last;
-                    const end_tok = (try self.stream.read(1))[0];
-                    const end = try self.charOrEscapeToChar(end_tok);
+                const end = try self.charOrEscapeToChar((try self.stream.read(1))[0]);
 
-                    var i: u8 = start;
-                    while (i <= end) : (i += 1) {
-                        try validity_map.put(self.allocator, i, {});
-                    }
-                },
+                var i: u8 = char;
+                while (i <= end) : (i += 1) {
+                    try set.values.append(self.allocator, i);
+                }
+
+                continue;
+            }
+
+            switch (orig_char) {
                 ']' => {
-                    var list = std.ArrayListUnmanaged(u8){};
-                    try list.ensureTotalCapacity(self.allocator, if (!negate) (validity_map.count()) else (256 - validity_map.count()));
-
-                    if (!negate) {
-                        var it = validity_map.iterator();
-                        while (it.next()) |v| try list.append(self.allocator, v.key_ptr.*);
-                    } else {
-                        var i: u8 = 0;
-                        while (true) : (i += 1) {
-                            if (!validity_map.contains(i))
-                                try list.append(self.allocator, i);
-                            if (i == 255) break;
-                        }
-                    }
-
-                    return list;
+                    return set;
                 },
                 else => {
-                    try validity_map.put(self.allocator, try self.charOrEscapeToChar(char), {});
+                    try set.values.append(self.allocator, char);
                 },
             }
         }
@@ -454,6 +457,18 @@ pub fn generate(result: PegResult, writer: anytype) !void {
     }
 }
 
+pub fn generateFormatted(allocator: std.mem.Allocator, result: PegResult) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+
+    try generate(result, buffer.writer());
+
+    const with_sentinel = try buffer.toOwnedSliceSentinel(0);
+    defer allocator.free(with_sentinel);
+
+    const tree = try std.zig.Ast.parse(allocator, with_sentinel, .zig);
+    return tree.render(allocator);
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -469,5 +484,5 @@ pub fn main() !void {
     var gen = PegParser.init(allocator, data);
     const p = try gen.parse();
 
-    try generate(p, out.writer());
+    try out.writeAll(try generateFormatted(allocator, p));
 }
