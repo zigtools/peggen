@@ -33,8 +33,7 @@ Definition	<- Identifier
 		     LEFTARROW Expression
 Expression	<- Sequence (SLASH Sequence)*
 Sequence	<- Prefix (Prefix)* /
-Prefix		<- AND Action
-		 / AND Suffix
+Prefix		<- AND Suffix
 		 / NOT Suffix
 		 /     Suffix
 Suffix		<- Primary (QUESTION

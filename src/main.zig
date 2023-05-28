@@ -196,6 +196,7 @@ pub const PegParser = struct {
         var peg = PegResult{
             .rules = .{},
         };
+
         while (true) {
             self.skipWhitespaceAndComments() catch break;
             const identifier = (self.readIdentifier() catch break) orelse return error.UnexpectedToken;
@@ -208,6 +209,7 @@ pub const PegParser = struct {
 
             try peg.rules.append(self.allocator, .{ .identifier = identifier, .expression = expr });
         }
+
         return peg;
     }
 
@@ -292,7 +294,7 @@ pub const PegParser = struct {
             }
         }
 
-        var mod = try self.modChar();
+        var mod = self.modChar() catch .none;
         switch (mod) {
             .none => {},
             else => {
@@ -302,7 +304,7 @@ pub const PegParser = struct {
             },
         }
 
-        try self.skipWhitespaceAndComments();
+        self.skipWhitespaceAndComments() catch {};
 
         return expr;
     }
@@ -312,14 +314,7 @@ pub const PegParser = struct {
         var selections = std.ArrayListUnmanaged(Expression){};
 
         while (true) {
-            var expr = try self.singleExpression() orelse {
-                try selections.append(self.allocator, .{
-                    .body = .{
-                        .group = try group.clone(self.allocator),
-                    },
-                });
-                break;
-            };
+            var expr = self.singleExpression() catch break orelse break;
             try group.append(self.allocator, expr);
 
             var slash_char = try self.stream.peek(0);
@@ -334,6 +329,12 @@ pub const PegParser = struct {
                 group.items.len = 0;
             }
         }
+
+        try selections.append(self.allocator, .{
+            .body = .{
+                .group = try group.clone(self.allocator),
+            },
+        });
 
         var expr = Expression{
             .body = .{ .select = selections },
