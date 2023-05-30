@@ -1,34 +1,5 @@
 const std = @import("std");
-
-pub const Stream = struct {
-    index: usize = 0,
-    buffer: []const u8,
-
-    pub fn peek(self: *Stream, by: usize) error{EndOfStream}!u8 {
-        if (self.index + by >= self.buffer.len) return error.EndOfStream;
-        return self.buffer[self.index + by];
-    }
-
-    pub fn consume(self: *Stream, count: usize) error{EndOfStream}!void {
-        if (self.index + count >= self.buffer.len) return error.EndOfStream;
-        self.index += count;
-    }
-
-    pub fn sliceToEnd(self: *Stream) []const u8 {
-        return self.buffer[self.index..];
-    }
-
-    pub fn sliceBy(self: *Stream, count: usize) error{EndOfStream}![]const u8 {
-        if (self.index + count >= self.buffer.len) return error.EndOfStream;
-        return self.buffer[self.index .. self.index + count];
-    }
-
-    pub fn read(self: *Stream, count: usize) error{EndOfStream}![]const u8 {
-        const res = try self.sliceBy(count);
-        try self.consume(count);
-        return res;
-    }
-};
+const Stream = @import("Stream.zig");
 
 pub fn isIdentifierCharacter(char: u8) bool {
     return std.ascii.isAlphanumeric(char) or char == '_';
@@ -97,28 +68,28 @@ pub const Expression = struct {
 
         switch (expr.lookahead) {
             .none => {},
-            .positive => try writer.writeAll("grammar.positive("),
-            .negative => try writer.writeAll("grammar.negative("),
+            .positive => try writer.writeAll("ParserGenerator.Positive("),
+            .negative => try writer.writeAll("ParserGenerator.Negative("),
         }
 
         switch (expr.modifier) {
             .none => {},
-            .optional => try writer.writeAll("grammar.optional("),
-            .zero_or_more => try writer.writeAll("grammar.zeroOrMore("),
-            .one_or_more => try writer.writeAll("grammar.oneOrMore("),
+            .optional => try writer.writeAll("ParserGenerator.Optional("),
+            .zero_or_more => try writer.writeAll("ParserGenerator.ZeroOrMore("),
+            .one_or_more => try writer.writeAll("ParserGenerator.OneOrMore("),
         }
 
         switch (expr.body) {
-            .any => try writer.writeAll("grammar.any()"),
+            .any => try writer.writeAll("ParserGenerator.Any()"),
             .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
-            .string => |str| try writer.print("\"{}\"", .{std.zig.fmtEscapes(str)}),
+            .string => |str| try writer.print("ParserGenerator.String(\"{}\")", .{std.zig.fmtEscapes(str)}),
             .set => |set| {
                 switch (set.kind) {
                     .positive => {
-                        try writer.writeAll("grammar.anyOf(.{");
+                        try writer.writeAll("ParserGenerator.AnyOf(.{");
                     },
                     .negative => {
-                        try writer.writeAll("grammar.noneOf(.{");
+                        try writer.writeAll("ParserGenerator.NoneOf(.{");
                     },
                 }
 
@@ -129,14 +100,14 @@ pub const Expression = struct {
                 try writer.writeAll("})");
             },
             .group => |group| {
-                try writer.writeAll("grammar.group(.{");
+                try writer.writeAll("ParserGenerator.Group(.{");
                 for (group.items) |sub_expr| {
                     try writer.print("{},", .{sub_expr});
                 }
                 try writer.writeAll("})");
             },
             .select => |select| {
-                try writer.writeAll("grammar.select(.{");
+                try writer.writeAll("ParserGenerator.Select(.{");
                 for (select.items) |sub_expr| {
                     try writer.print("{},", .{sub_expr});
                 }
@@ -447,14 +418,17 @@ pub const PegParser = struct {
 
 pub fn generate(result: PegResult, writer: anytype) !void {
     try writer.writeAll(
-        \\const grammar = @import("peggen").grammar;
-        \\
-        \\
+        \\pub fn Parser(comptime ParserGenerator: type) type {
+        \\return struct{
     );
 
     for (result.rules.items) |rule| {
-        try writer.print("const {} = {};\n\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
+        try writer.print("pub const {} = struct {{pub usingnamespace {};}};\n\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
     }
+
+    try writer.writeAll(
+        \\};}
+    );
 }
 
 pub fn generateFormatted(allocator: std.mem.Allocator, result: PegResult) ![]const u8 {
@@ -471,18 +445,37 @@ pub fn generateFormatted(allocator: std.mem.Allocator, result: PegResult) ![]con
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+    _ = allocator;
 
-    var out = try std.fs.cwd().createFile("out.zig", .{});
-    defer out.close();
+    // var out = try std.fs.cwd().createFile("out.zig", .{});
+    // defer out.close();
 
-    var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
-    defer grammar.close();
+    // var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
+    // defer grammar.close();
 
-    var data = try grammar.readToEndAlloc(allocator, 50_000);
-    defer allocator.free(data);
+    // var data = try grammar.readToEndAlloc(allocator, 50_000);
+    // defer allocator.free(data);
 
-    var gen = PegParser.init(allocator, data);
-    const p = try gen.parse();
+    // var gen = PegParser.init(allocator, data);
+    // const p = try gen.parse();
 
-    try out.writeAll(try generateFormatted(allocator, p));
+    // try out.writeAll(try generateFormatted(allocator, p));
+
+    const simple = @import("gens/simple.zig");
+    const peg = @import("peg.zig");
+
+    // var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
+    // defer grammar.close();
+
+    // var data = try grammar.readToEndAlloc(allocator, 50_000);
+    // defer allocator.free(data);
+
+    var stream = Stream{ .buffer = "a <- b } {" };
+    var ctx = simple.Context{};
+
+    const p = peg.Parser(simple.SimpleParserGenerator);
+    p.Grammar.validate(&stream, &ctx) catch |err| {
+        std.log.err("Error @ {d}", .{ctx.error_index.?});
+        return err;
+    };
 }
