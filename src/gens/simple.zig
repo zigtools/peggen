@@ -2,70 +2,79 @@ const std = @import("std");
 const Stream = @import("../Stream.zig");
 
 pub const Context = struct {
-    error_index: ?usize = null,
+    allocator: std.mem.Allocator,
+    error_indices: std.ArrayListUnmanaged(usize) = .{},
 
-    fn setErrorIndex(ctx: *Context, idx: usize) void {
-        if (ctx.error_index == null) ctx.error_index = idx;
+    fn addError(ctx: *Context, stream: *Stream, rule: []const u8) void {
+        _ = ctx;
+        std.log.err("Rule {s} emitted an error at {d}", .{ rule, stream.index });
     }
 };
 
 pub const SimpleParserGenerator = struct {
-    pub fn String(comptime string: []const u8) type {
+    pub fn String(comptime rule: @TypeOf(.enum_literal), comptime expected: []const u8) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
-                const current = stream.index;
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
+                const actual = stream.read(expected.len) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        ctx.addError(stream, @tagName(rule));
+                        return error.TraversalFailure;
+                    },
+                    else => return err,
+                };
 
-                if (!std.mem.eql(u8, try stream.read(string.len), string)) {
-                    stream.index = current;
-                    ctx.setErrorIndex(stream.index);
-                    return error.ValidateFailure;
+                std.log.info("{s} ?= {s}", .{ actual, expected });
+
+                if (!std.mem.eql(u8, actual, expected)) {
+                    ctx.addError(stream, @tagName(rule));
+                    return error.TraversalFailure;
                 }
             }
         };
     }
 
-    pub fn Positive(comptime entry: anytype) type {
+    pub fn Positive(comptime rule: @TypeOf(.enum_literal), comptime entry: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 const current = stream.index;
                 defer stream.index = current;
 
-                entry.validate(stream, ctx) catch |err| switch (err) {
-                    error.ValidateFailure => {
-                        ctx.setErrorIndex(stream.index);
-                        return error.ValidateFailure;
+                entry.traverse(stream, ctx) catch |err| switch (err) {
+                    error.TraversalFailure => {
+                        ctx.addError(stream, @tagName(rule));
+                        return error.TraversalFailure;
                     },
                     else => return err,
                 };
             }
         };
     }
-    pub fn Negative(comptime entry: anytype) type {
+    pub fn Negative(comptime rule: @TypeOf(.enum_literal), comptime entry: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 const current = stream.index;
                 defer stream.index = current;
 
-                entry.validate(stream, ctx) catch |err| switch (err) {
-                    error.ValidateFailure => return,
+                entry.traverse(stream, ctx) catch |err| switch (err) {
+                    error.TraversalFailure => return,
                     else => return err,
                 };
 
-                ctx.setErrorIndex(stream.index);
-                return error.ValidateFailure;
+                ctx.addError(stream, @tagName(rule));
+                return error.TraversalFailure;
             }
         };
     }
 
-    pub fn Optional(comptime entry: anytype) type {
+    pub fn Optional(comptime rule: @TypeOf(.enum_literal), comptime entry: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 const current = stream.index;
 
-                entry.validate(stream, ctx) catch |err| switch (err) {
-                    error.ValidateFailure => {
+                entry.traverse(stream, ctx) catch |err| switch (err) {
+                    error.TraversalFailure => {
                         stream.index = current;
-                        ctx.setErrorIndex(stream.index);
+                        ctx.addError(stream, @tagName(rule));
                         return;
                     },
                     else => return err,
@@ -73,16 +82,16 @@ pub const SimpleParserGenerator = struct {
             }
         };
     }
-    pub fn ZeroOrMore(comptime entry: anytype) type {
+    pub fn ZeroOrMore(comptime rule: @TypeOf(.enum_literal), comptime entry: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 while (true) {
                     const current = stream.index;
 
-                    entry.validate(stream, ctx) catch |err| switch (err) {
-                        error.ValidateFailure => {
+                    entry.traverse(stream, ctx) catch |err| switch (err) {
+                        error.TraversalFailure => {
                             stream.index = current;
-                            ctx.setErrorIndex(stream.index);
+                            ctx.addError(stream, @tagName(rule));
                             return;
                         },
                         else => return err,
@@ -91,20 +100,20 @@ pub const SimpleParserGenerator = struct {
             }
         };
     }
-    pub fn OneOrMore(comptime entry: anytype) type {
+    pub fn OneOrMore(comptime rule: @TypeOf(.enum_literal), comptime entry: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 var i: usize = 0;
                 while (true) : (i += 1) {
                     const current = stream.index;
 
-                    entry.validate(stream, ctx) catch |err| switch (err) {
-                        error.ValidateFailure => {
+                    entry.traverse(stream, ctx) catch |err| switch (err) {
+                        error.TraversalFailure => {
                             stream.index = current;
 
                             if (i == 0) {
-                                ctx.setErrorIndex(stream.index);
-                                return error.ValidateFailure;
+                                ctx.addError(stream, @tagName(rule));
+                                return error.TraversalFailure;
                             }
 
                             return;
@@ -116,22 +125,22 @@ pub const SimpleParserGenerator = struct {
         };
     }
 
-    pub fn Any() type {
+    pub fn Any(comptime rule: @TypeOf(.enum_literal)) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 stream.consume(1) catch |err| switch (err) {
                     error.EndOfStream => {
-                        ctx.setErrorIndex(stream.index);
-                        return error.ValidateFailure;
+                        ctx.addError(stream, @tagName(rule));
+                        return error.TraversalFailure;
                     },
                     else => return err,
                 };
             }
         };
     }
-    pub fn AnyOf(comptime entries: anytype) type {
+    pub fn AnyOf(comptime rule: @TypeOf(.enum_literal), comptime entries: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 var set = comptime b: {
                     var cset = std.bit_set.StaticBitSet(256).initEmpty();
                     for (entries) |val| {
@@ -140,59 +149,77 @@ pub const SimpleParserGenerator = struct {
                     break :b cset;
                 };
 
-                const current = stream.index;
-                if (!set.isSet((try stream.read(1))[0])) {
-                    stream.index = current;
-                    ctx.setErrorIndex(stream.index);
-                    return error.ValidateFailure;
+                const char = (stream.read(1) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        ctx.addError(stream, @tagName(rule));
+                        return error.TraversalFailure;
+                    },
+                    else => return err,
+                })[0];
+
+                if (!set.isSet(char)) {
+                    ctx.addError(stream, @tagName(rule));
+                    return error.TraversalFailure;
                 }
             }
         };
     }
-    pub fn NoneOf(comptime entries: anytype) type {
+    pub fn NoneOf(comptime rule: @TypeOf(.enum_literal), comptime entries: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 comptime var set = std.bit_set.StaticBitSet(256).initEmpty();
                 inline for (entries) |val| {
                     set.setValue(val, true);
                 }
 
-                const current = stream.index;
-                if (set.isSet((try stream.read(1))[0])) {
-                    stream.index = current;
-                    ctx.setErrorIndex(stream.index);
-                    return error.ValidateFailure;
+                const char = (stream.read(1) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        ctx.addError(stream, @tagName(rule));
+                        return error.TraversalFailure;
+                    },
+                    else => return err,
+                })[0];
+
+                if (set.isSet(char)) {
+                    ctx.addError(stream, @tagName(rule));
+                    return error.TraversalFailure;
                 }
             }
         };
     }
 
-    pub fn Group(comptime entries: anytype) type {
+    pub fn Group(comptime rule: @TypeOf(.enum_literal), comptime entries: anytype) type {
+        _ = rule;
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
                 inline for (entries) |entry| {
-                    try entry.validate(stream, ctx);
+                    try entry.traverse(stream, ctx);
                 }
             }
         };
     }
-    pub fn Select(comptime entries: anytype) type {
+    pub fn Select(comptime rule: @TypeOf(.enum_literal), comptime entries: anytype) type {
         return struct {
-            pub fn validate(stream: *Stream, ctx: *Context) anyerror!void {
+            pub fn traverse(stream: *Stream, ctx: *Context) anyerror!void {
+                const current = stream.index;
+
                 inline for (entries) |entry| {
-                    var valid = false;
-                    entry.validate(stream, ctx) catch |err| switch (err) {
-                        error.ValidateFailure => {
-                            valid = true;
+                    var valid = true;
+
+                    entry.traverse(stream, ctx) catch |err| switch (err) {
+                        error.TraversalFailure => {
+                            stream.index = current;
+                            valid = false;
                         },
                         else => return err,
                     };
-                    if (!valid)
+
+                    if (valid)
                         return;
                 }
 
-                ctx.setErrorIndex(stream.index);
-                return error.ValidateFailure;
+                ctx.addError(stream, @tagName(rule));
+                return error.TraversalFailure;
             }
         };
     }

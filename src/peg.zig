@@ -1,15 +1,15 @@
 pub fn Parser(comptime ParserGenerator: type) type {
     return struct {
         pub const Grammar = struct {
-            pub usingnamespace ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Group(.Grammar, .{
                 Spacing,
-                ParserGenerator.OneOrMore(Definition),
+                ParserGenerator.OneOrMore(.Grammar, Definition),
                 EndOfFile,
             });
         };
 
         pub const Definition = struct {
-            pub usingnamespace ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Group(.Definition, .{
                 Identifier,
                 LEFTARROW,
                 Expression,
@@ -17,9 +17,9 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Expression = struct {
-            pub usingnamespace ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Group(.Expression, .{
                 Sequence,
-                ParserGenerator.ZeroOrMore(ParserGenerator.Group(.{
+                ParserGenerator.ZeroOrMore(.Expression, ParserGenerator.Group(.Expression, .{
                     SLASH,
                     Sequence,
                 })),
@@ -27,22 +27,22 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Sequence = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Select(.Sequence, .{
+                ParserGenerator.Group(.Sequence, .{
                     Prefix,
-                    ParserGenerator.ZeroOrMore(Prefix),
+                    ParserGenerator.ZeroOrMore(.Sequence, Prefix),
                 }),
-                ParserGenerator.Group(.{}),
+                ParserGenerator.Group(.Sequence, .{}),
             });
         };
 
         pub const Prefix = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Select(.Prefix, .{
+                ParserGenerator.Group(.Prefix, .{
                     AND,
                     Suffix,
                 }),
-                ParserGenerator.Group(.{
+                ParserGenerator.Group(.Prefix, .{
                     NOT,
                     Suffix,
                 }),
@@ -51,9 +51,9 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Suffix = struct {
-            pub usingnamespace ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Group(.Suffix, .{
                 Primary,
-                ParserGenerator.Optional(ParserGenerator.Select(.{
+                ParserGenerator.Optional(.Suffix, ParserGenerator.Select(.Suffix, .{
                     QUESTION,
                     STAR,
                     PLUS,
@@ -62,12 +62,12 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Primary = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Select(.Primary, .{
+                ParserGenerator.Group(.Primary, .{
                     Identifier,
-                    ParserGenerator.Negative(LEFTARROW),
+                    ParserGenerator.Negative(.Primary, LEFTARROW),
                 }),
-                ParserGenerator.Group(.{
+                ParserGenerator.Group(.Primary, .{
                     OPEN,
                     Expression,
                     CLOSE,
@@ -79,15 +79,15 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Identifier = struct {
-            pub usingnamespace ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Group(.Identifier, .{
                 IdentStart,
-                ParserGenerator.ZeroOrMore(IdentCont),
+                ParserGenerator.ZeroOrMore(.Identifier, IdentCont),
                 Spacing,
             });
         };
 
         pub const IdentStart = struct {
-            pub usingnamespace ParserGenerator.AnyOf(.{
+            pub usingnamespace ParserGenerator.AnyOf(.IdentStart, .{
                 'a',
                 'b',
                 'c',
@@ -145,9 +145,9 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const IdentCont = struct {
-            pub usingnamespace ParserGenerator.Select(.{
+            pub usingnamespace ParserGenerator.Select(.IdentCont, .{
                 IdentStart,
-                ParserGenerator.AnyOf(.{
+                ParserGenerator.AnyOf(.IdentCont, .{
                     '0',
                     '1',
                     '2',
@@ -163,33 +163,33 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Literal = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
-                    ParserGenerator.AnyOf(.{
+            pub usingnamespace ParserGenerator.Select(.Literal, .{
+                ParserGenerator.Group(.Literal, .{
+                    ParserGenerator.AnyOf(.Literal, .{
                         '\'',
                     }),
-                    ParserGenerator.ZeroOrMore(ParserGenerator.Group(.{
-                        ParserGenerator.Negative(ParserGenerator.AnyOf(.{
+                    ParserGenerator.ZeroOrMore(.Literal, ParserGenerator.Group(.Literal, .{
+                        ParserGenerator.Negative(.Literal, ParserGenerator.AnyOf(.Literal, .{
                             '\'',
                         })),
                         Char,
                     })),
-                    ParserGenerator.AnyOf(.{
+                    ParserGenerator.AnyOf(.Literal, .{
                         '\'',
                     }),
                     Spacing,
                 }),
-                ParserGenerator.Group(.{
-                    ParserGenerator.AnyOf(.{
+                ParserGenerator.Group(.Literal, .{
+                    ParserGenerator.AnyOf(.Literal, .{
                         '"',
                     }),
-                    ParserGenerator.ZeroOrMore(ParserGenerator.Group(.{
-                        ParserGenerator.Negative(ParserGenerator.AnyOf(.{
+                    ParserGenerator.ZeroOrMore(.Literal, ParserGenerator.Group(.Literal, .{
+                        ParserGenerator.Negative(.Literal, ParserGenerator.AnyOf(.Literal, .{
                             '"',
                         })),
                         Char,
                     })),
-                    ParserGenerator.AnyOf(.{
+                    ParserGenerator.AnyOf(.Literal, .{
                         '"',
                     }),
                     Spacing,
@@ -198,22 +198,22 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Class = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("["),
-                ParserGenerator.ZeroOrMore(ParserGenerator.Group(.{
-                    ParserGenerator.Negative(ParserGenerator.String("]")),
+            pub usingnamespace ParserGenerator.Group(.Class, .{
+                ParserGenerator.String(.Class, "["),
+                ParserGenerator.ZeroOrMore(.Class, ParserGenerator.Group(.Class, .{
+                    ParserGenerator.Negative(.Class, ParserGenerator.String(.Class, "]")),
                     Range,
                 })),
-                ParserGenerator.String("]"),
+                ParserGenerator.String(.Class, "]"),
                 Spacing,
             });
         };
 
         pub const Range = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
+            pub usingnamespace ParserGenerator.Select(.Range, .{
+                ParserGenerator.Group(.Range, .{
                     Char,
-                    ParserGenerator.String("-"),
+                    ParserGenerator.String(.Range, "-"),
                     Char,
                 }),
                 Char,
@@ -221,10 +221,10 @@ pub fn Parser(comptime ParserGenerator: type) type {
         };
 
         pub const Char = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.Group(.{
-                    ParserGenerator.String("\\"),
-                    ParserGenerator.AnyOf(.{
+            pub usingnamespace ParserGenerator.Select(.Char, .{
+                ParserGenerator.Group(.Char, .{
+                    ParserGenerator.String(.Char, "\\"),
+                    ParserGenerator.AnyOf(.Char, .{
                         'a',
                         'b',
                         'e',
@@ -240,15 +240,15 @@ pub fn Parser(comptime ParserGenerator: type) type {
                         '\\',
                     }),
                 }),
-                ParserGenerator.Group(.{
-                    ParserGenerator.String("\\"),
-                    ParserGenerator.AnyOf(.{
+                ParserGenerator.Group(.Char, .{
+                    ParserGenerator.String(.Char, "\\"),
+                    ParserGenerator.AnyOf(.Char, .{
                         '0',
                         '1',
                         '2',
                         '3',
                     }),
-                    ParserGenerator.AnyOf(.{
+                    ParserGenerator.AnyOf(.Char, .{
                         '0',
                         '1',
                         '2',
@@ -258,7 +258,7 @@ pub fn Parser(comptime ParserGenerator: type) type {
                         '6',
                         '7',
                     }),
-                    ParserGenerator.AnyOf(.{
+                    ParserGenerator.AnyOf(.Char, .{
                         '0',
                         '1',
                         '2',
@@ -269,9 +269,9 @@ pub fn Parser(comptime ParserGenerator: type) type {
                         '7',
                     }),
                 }),
-                ParserGenerator.Group(.{
-                    ParserGenerator.String("\\"),
-                    ParserGenerator.AnyOf(.{
+                ParserGenerator.Group(.Char, .{
+                    ParserGenerator.String(.Char, "\\"),
+                    ParserGenerator.AnyOf(.Char, .{
                         '0',
                         '1',
                         '2',
@@ -281,7 +281,7 @@ pub fn Parser(comptime ParserGenerator: type) type {
                         '6',
                         '7',
                     }),
-                    ParserGenerator.Optional(ParserGenerator.AnyOf(.{
+                    ParserGenerator.Optional(.Char, ParserGenerator.AnyOf(.Char, .{
                         '0',
                         '1',
                         '2',
@@ -292,123 +292,123 @@ pub fn Parser(comptime ParserGenerator: type) type {
                         '7',
                     })),
                 }),
-                ParserGenerator.Group(.{
-                    ParserGenerator.String("\\"),
-                    ParserGenerator.String("-"),
+                ParserGenerator.Group(.Char, .{
+                    ParserGenerator.String(.Char, "\\"),
+                    ParserGenerator.String(.Char, "-"),
                 }),
-                ParserGenerator.Group(.{
-                    ParserGenerator.Negative(ParserGenerator.String("\\")),
-                    ParserGenerator.Any(),
+                ParserGenerator.Group(.Char, .{
+                    ParserGenerator.Negative(.Char, ParserGenerator.String(.Char, "\\")),
+                    ParserGenerator.Any(.Char),
                 }),
             });
         };
 
         pub const LEFTARROW = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("<-"),
+            pub usingnamespace ParserGenerator.Group(.LEFTARROW, .{
+                ParserGenerator.String(.LEFTARROW, "<-"),
                 Spacing,
             });
         };
 
         pub const SLASH = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("/"),
+            pub usingnamespace ParserGenerator.Group(.SLASH, .{
+                ParserGenerator.String(.SLASH, "/"),
                 Spacing,
             });
         };
 
         pub const AND = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("&"),
+            pub usingnamespace ParserGenerator.Group(.AND, .{
+                ParserGenerator.String(.AND, "&"),
                 Spacing,
             });
         };
 
         pub const NOT = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("!"),
+            pub usingnamespace ParserGenerator.Group(.NOT, .{
+                ParserGenerator.String(.NOT, "!"),
                 Spacing,
             });
         };
 
         pub const QUESTION = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("?"),
+            pub usingnamespace ParserGenerator.Group(.QUESTION, .{
+                ParserGenerator.String(.QUESTION, "?"),
                 Spacing,
             });
         };
 
         pub const STAR = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("*"),
+            pub usingnamespace ParserGenerator.Group(.STAR, .{
+                ParserGenerator.String(.STAR, "*"),
                 Spacing,
             });
         };
 
         pub const PLUS = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("+"),
+            pub usingnamespace ParserGenerator.Group(.PLUS, .{
+                ParserGenerator.String(.PLUS, "+"),
                 Spacing,
             });
         };
 
         pub const OPEN = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("("),
+            pub usingnamespace ParserGenerator.Group(.OPEN, .{
+                ParserGenerator.String(.OPEN, "("),
                 Spacing,
             });
         };
 
         pub const CLOSE = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String(")"),
+            pub usingnamespace ParserGenerator.Group(.CLOSE, .{
+                ParserGenerator.String(.CLOSE, ")"),
                 Spacing,
             });
         };
 
         pub const DOT = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("."),
+            pub usingnamespace ParserGenerator.Group(.DOT, .{
+                ParserGenerator.String(.DOT, "."),
                 Spacing,
             });
         };
 
         pub const Spacing = struct {
-            pub usingnamespace ParserGenerator.ZeroOrMore(ParserGenerator.Select(.{
+            pub usingnamespace ParserGenerator.ZeroOrMore(.Spacing, ParserGenerator.Select(.Spacing, .{
                 Space,
                 Comment,
             }));
         };
 
         pub const Comment = struct {
-            pub usingnamespace ParserGenerator.Group(.{
-                ParserGenerator.String("#"),
-                ParserGenerator.ZeroOrMore(ParserGenerator.Group(.{
-                    ParserGenerator.Negative(EndOfLine),
-                    ParserGenerator.Any(),
+            pub usingnamespace ParserGenerator.Group(.Comment, .{
+                ParserGenerator.String(.Comment, "#"),
+                ParserGenerator.ZeroOrMore(.Comment, ParserGenerator.Group(.Comment, .{
+                    ParserGenerator.Negative(.Comment, EndOfLine),
+                    ParserGenerator.Any(.Comment),
                 })),
                 EndOfLine,
             });
         };
 
         pub const Space = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.String(" "),
-                ParserGenerator.String("\t"),
+            pub usingnamespace ParserGenerator.Select(.Space, .{
+                ParserGenerator.String(.Space, " "),
+                ParserGenerator.String(.Space, "\t"),
                 EndOfLine,
             });
         };
 
         pub const EndOfLine = struct {
-            pub usingnamespace ParserGenerator.Select(.{
-                ParserGenerator.String("\r\n"),
-                ParserGenerator.String("\n"),
-                ParserGenerator.String("\r"),
+            pub usingnamespace ParserGenerator.Select(.EndOfLine, .{
+                ParserGenerator.String(.EndOfLine, "\r\n"),
+                ParserGenerator.String(.EndOfLine, "\n"),
+                ParserGenerator.String(.EndOfLine, "\r"),
             });
         };
 
         pub const EndOfFile = struct {
-            pub usingnamespace ParserGenerator.Negative(ParserGenerator.Any());
+            pub usingnamespace ParserGenerator.Negative(.EndOfFile, ParserGenerator.Any(.EndOfFile));
         };
     };
 }

@@ -62,69 +62,77 @@ pub const Expression = struct {
         }
     }
 
-    pub fn format(expr: Expression, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = options;
-        _ = fmt;
+    pub const Formatter = struct {
+        expr: Expression,
+        rule: []const u8,
 
-        switch (expr.lookahead) {
-            .none => {},
-            .positive => try writer.writeAll("ParserGenerator.Positive("),
-            .negative => try writer.writeAll("ParserGenerator.Negative("),
+        pub fn format(formatter: Formatter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = options;
+            _ = fmt;
+
+            const expr = formatter.expr;
+            const rule = formatter.rule;
+
+            switch (expr.lookahead) {
+                .none => {},
+                .positive => try writer.print("ParserGenerator.Positive(.{}, ", .{std.zig.fmtId(rule)}),
+                .negative => try writer.print("ParserGenerator.Negative(.{}, ", .{std.zig.fmtId(rule)}),
+            }
+
+            switch (expr.modifier) {
+                .none => {},
+                .optional => try writer.print("ParserGenerator.Optional(.{}, ", .{std.zig.fmtId(rule)}),
+                .zero_or_more => try writer.print("ParserGenerator.ZeroOrMore(.{}, ", .{std.zig.fmtId(rule)}),
+                .one_or_more => try writer.print("ParserGenerator.OneOrMore(.{}, ", .{std.zig.fmtId(rule)}),
+            }
+
+            switch (expr.body) {
+                .any => try writer.print("ParserGenerator.Any(.{})", .{std.zig.fmtId(rule)}),
+                .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
+                .string => |str| try writer.print("ParserGenerator.String(.{}, \"{}\")", .{ std.zig.fmtId(rule), std.zig.fmtEscapes(str) }),
+                .set => |set| {
+                    switch (set.kind) {
+                        .positive => {
+                            try writer.print("ParserGenerator.AnyOf(.{}, .{{", .{std.zig.fmtId(rule)});
+                        },
+                        .negative => {
+                            try writer.print("ParserGenerator.NoneOf(.{}, .{{", .{std.zig.fmtId(rule)});
+                        },
+                    }
+
+                    for (set.values.items) |val| {
+                        try writer.print("'{'}',", .{std.zig.fmtEscapes(&.{val})});
+                    }
+
+                    try writer.writeAll("})");
+                },
+                .group => |group| {
+                    try writer.print("ParserGenerator.Group(.{}, .{{", .{std.zig.fmtId(rule)});
+                    for (group.items) |sub_expr| {
+                        try writer.print("{},", .{Expression.Formatter{ .expr = sub_expr, .rule = rule }});
+                    }
+                    try writer.writeAll("})");
+                },
+                .select => |select| {
+                    try writer.print("ParserGenerator.Select(.{}, .{{", .{std.zig.fmtId(rule)});
+                    for (select.items) |sub_expr| {
+                        try writer.print("{},", .{Expression.Formatter{ .expr = sub_expr, .rule = rule }});
+                    }
+                    try writer.writeAll("})");
+                },
+            }
+
+            switch (expr.modifier) {
+                .none => {},
+                else => try writer.writeAll(")"),
+            }
+
+            switch (expr.lookahead) {
+                .none => {},
+                else => try writer.writeAll(")"),
+            }
         }
-
-        switch (expr.modifier) {
-            .none => {},
-            .optional => try writer.writeAll("ParserGenerator.Optional("),
-            .zero_or_more => try writer.writeAll("ParserGenerator.ZeroOrMore("),
-            .one_or_more => try writer.writeAll("ParserGenerator.OneOrMore("),
-        }
-
-        switch (expr.body) {
-            .any => try writer.writeAll("ParserGenerator.Any()"),
-            .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
-            .string => |str| try writer.print("ParserGenerator.String(\"{}\")", .{std.zig.fmtEscapes(str)}),
-            .set => |set| {
-                switch (set.kind) {
-                    .positive => {
-                        try writer.writeAll("ParserGenerator.AnyOf(.{");
-                    },
-                    .negative => {
-                        try writer.writeAll("ParserGenerator.NoneOf(.{");
-                    },
-                }
-
-                for (set.values.items) |val| {
-                    try writer.print("'{'}',", .{std.zig.fmtEscapes(&.{val})});
-                }
-
-                try writer.writeAll("})");
-            },
-            .group => |group| {
-                try writer.writeAll("ParserGenerator.Group(.{");
-                for (group.items) |sub_expr| {
-                    try writer.print("{},", .{sub_expr});
-                }
-                try writer.writeAll("})");
-            },
-            .select => |select| {
-                try writer.writeAll("ParserGenerator.Select(.{");
-                for (select.items) |sub_expr| {
-                    try writer.print("{},", .{sub_expr});
-                }
-                try writer.writeAll("})");
-            },
-        }
-
-        switch (expr.modifier) {
-            .none => {},
-            else => try writer.writeAll(")"),
-        }
-
-        switch (expr.lookahead) {
-            .none => {},
-            else => try writer.writeAll(")"),
-        }
-    }
+    };
 };
 
 pub const Rule = struct {
@@ -355,6 +363,7 @@ pub const PegParser = struct {
             '[' => '[',
             ']' => ']',
             '\\' => '\\',
+            '-' => '-',
             else => unreachable,
         };
     }
@@ -423,7 +432,10 @@ pub fn generate(result: PegResult, writer: anytype) !void {
     );
 
     for (result.rules.items) |rule| {
-        try writer.print("pub const {} = struct {{pub usingnamespace {};}};\n\n", .{ std.zig.fmtId(rule.identifier), rule.expression });
+        try writer.print("pub const {} = struct {{pub usingnamespace {};}};\n\n", .{
+            std.zig.fmtId(rule.identifier),
+            Expression.Formatter{ .expr = rule.expression, .rule = rule.identifier },
+        });
     }
 
     try writer.writeAll(
@@ -445,10 +457,23 @@ pub fn generateFormatted(allocator: std.mem.Allocator, result: PegResult) ![]con
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    _ = allocator;
 
-    // var out = try std.fs.cwd().createFile("out.zig", .{});
-    // defer out.close();
+    var out = try std.fs.cwd().createFile("out.zig", .{});
+    defer out.close();
+
+    var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
+    defer grammar.close();
+
+    var data = try grammar.readToEndAlloc(allocator, 50_000);
+    defer allocator.free(data);
+
+    var gen = PegParser.init(allocator, data);
+    const p = try gen.parse();
+
+    try out.writeAll(try generateFormatted(allocator, p));
+
+    // const simple = @import("gens/simple.zig");
+    // const peg = @import("peg.zig");
 
     // var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
     // defer grammar.close();
@@ -456,26 +481,16 @@ pub fn main() !void {
     // var data = try grammar.readToEndAlloc(allocator, 50_000);
     // defer allocator.free(data);
 
-    // var gen = PegParser.init(allocator, data);
-    // const p = try gen.parse();
+    // var stream = Stream{ .buffer =
+    // \\a <- b
+    // \\b <- c
+    // \\
+    // };
+    // var ctx = simple.Context{
+    //     .allocator = allocator,
+    // };
 
-    // try out.writeAll(try generateFormatted(allocator, p));
-
-    const simple = @import("gens/simple.zig");
-    const peg = @import("peg.zig");
-
-    // var grammar = try std.fs.cwd().openFile("examples/peg.peg", .{});
-    // defer grammar.close();
-
-    // var data = try grammar.readToEndAlloc(allocator, 50_000);
-    // defer allocator.free(data);
-
-    var stream = Stream{ .buffer = "a <- b } {" };
-    var ctx = simple.Context{};
-
-    const p = peg.Parser(simple.SimpleParserGenerator);
-    p.Grammar.validate(&stream, &ctx) catch |err| {
-        std.log.err("Error @ {d}", .{ctx.error_index.?});
-        return err;
-    };
+    // const p = peg.Parser(simple.SimpleParserGenerator);
+    // try p.Grammar.traverse(&stream, &ctx);
+    // std.log.info("{d}", .{stream.index});
 }

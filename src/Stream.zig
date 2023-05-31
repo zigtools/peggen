@@ -9,7 +9,7 @@ pub fn peek(self: *Stream, by: usize) error{EndOfStream}!u8 {
 }
 
 pub fn consume(self: *Stream, count: usize) error{EndOfStream}!void {
-    if (self.index + count >= self.buffer.len) return error.EndOfStream;
+    if (self.index + count > self.buffer.len) return error.EndOfStream;
     self.index += count;
 }
 
@@ -18,7 +18,7 @@ pub fn sliceToEnd(self: *Stream) []const u8 {
 }
 
 pub fn sliceBy(self: *Stream, count: usize) error{EndOfStream}![]const u8 {
-    if (self.index + count >= self.buffer.len) return error.EndOfStream;
+    if (self.index + count > self.buffer.len) return error.EndOfStream;
     return self.buffer[self.index .. self.index + count];
 }
 
