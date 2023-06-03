@@ -132,7 +132,8 @@ pub fn Group(comptime rule: @TypeOf(.enum_literal), comptime parsers: anytype) t
             const state = stream.checkpoint();
             errdefer stream.restore(state);
             inline for (parsers) |parser|
-                try parser.match(stream, ctx);
+                parser.match(stream, ctx) catch
+                    return error.ParseFailure;
         }
     };
 }
