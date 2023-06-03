@@ -71,15 +71,19 @@ pub const Expression = struct {
     }
 
     pub fn format(e: Expression, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        const use_parens = e.modifier != .none and
-            ((e.body == .group and e.body.group.items.len > 1) or
-            (e.body == .select and e.body.select.items.len > 1));
+        try formatImpl(e, fmt, options, writer, 0);
+    }
+
+    pub fn formatImpl(e: Expression, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, depth: u8) !void {
+        const print_parens =
+            ((e.modifier != .none and e.body == .group and e.body.group.items.len > 1) or
+            (depth != 0 and e.body == .select and e.body.select.items.len > 1));
         try writer.writeAll(switch (e.lookahead) {
             .negative => "!",
             .positive => "&",
             .none => "",
         });
-        if (use_parens) _ = try writer.write("(");
+        if (print_parens) _ = try writer.write("(");
         switch (e.body) {
             .any => try writer.writeByte('.'),
             .identifier => |s| _ = try writer.write(s),
@@ -107,14 +111,30 @@ pub const Expression = struct {
             },
             .group => |g| for (g.items, 0..) |item, i| {
                 if (i != 0) _ = try writer.write(" ");
-                try std.fmt.formatType(item, fmt, options, writer, 3);
+                try formatImpl(item, fmt, options, writer, depth + 1);
             },
+            // print top level select items on separate lines
             .select => |g| for (g.items, 0..) |item, i| {
-                if (i != 0) _ = try writer.write(" / ");
-                try std.fmt.formatType(item, fmt, options, writer, 3);
+                // add newline and aligned spacing when depth == 0
+                if (depth == 0) {
+                    _ = try writer.write("\n");
+                    if (i == 0) {
+                        try writer.writeByteNTimes(' ', 6);
+                    } else {
+                        try writer.writeByteNTimes(' ', 4);
+                    }
+                }
+                // print aligned '/' separator
+                if (i != 0) {
+                    if (depth == 0)
+                        _ = try writer.write("/ ")
+                    else
+                        _ = try writer.write(" / ");
+                }
+                try formatImpl(item, fmt, options, writer, depth + 1);
             },
         }
-        if (use_parens) _ = try writer.write(")");
+        if (print_parens) _ = try writer.write(")");
         _ = try writer.write(switch (e.modifier) {
             .none => "",
             .zero_or_more => "*",
