@@ -182,7 +182,7 @@ pub const Expression = struct {
                     } else if (str[0] == '"') {
                         if (str.len == 3)
                             try writer.print(
-                                "ParserGenerator.Char(.{}, \"{}\")",
+                                "ParserGenerator.Char(.{}, \"{}\"[0])",
                                 .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{str[1]}) },
                             )
                         else
@@ -200,8 +200,6 @@ pub const Expression = struct {
                     // trim off leading '[^' and trailing ']'
                     const input =
                         set.values[1 + @as(u8, @boolToInt(set.kind == .negative)) .. set.values.len - 1];
-                    var stream = Stream.init(input, &buf);
-                    var ctx = Pg.Context{ .file_path = "<set range ctx>" };
 
                     // need to separate the range by '-' but not '\-' and the
                     // 'range' parser doesn't accept non-printable ascii
@@ -227,14 +225,19 @@ pub const Expression = struct {
 
                     const ac_dash_ac = Pg.Group(.ac_dash_ac, .{ any_char, dash, any_char });
                     const range_any = Pg.Select(.range_any, .{ ac_dash_ac, any_char });
+                    var stream = Stream.init(input, &buf);
+                    var ctx = Pg.Context{ .file_path = "<set range ctx>" };
                     var parser_iter = Pg.iterator(range_any, &stream, &ctx);
 
                     const count = parser_iter.count() catch |e| {
                         std.log.err("{} during parser_iter.count() input={s}", .{ e, input });
-                        return;
+                        return error.OutOfMemory;
                     };
                     parser_iter.reset();
 
+                    if (set.kind == .negative) {
+                        try writer.print("ParserGenerator.Not(.{}, ", .{std.zig.fmtId(rule)});
+                    }
                     if (count > 1)
                         try writer.print("ParserGenerator.Select(.{}, .{{", .{std.zig.fmtId(rule)});
 
@@ -244,12 +247,8 @@ pub const Expression = struct {
                                 "{}. could not parse range '{s}' from square set '{s}'",
                                 .{ e, stream.input[stream.index..], set.values },
                             );
-                            return;
+                            return error.OutOfMemory;
                         } orelse break;
-
-                        if (set.kind == .negative) {
-                            try writer.print("ParserGenerator.Not(.{}, ", .{std.zig.fmtId(rule)});
-                        }
 
                         if (raw_range.len == 1) {
                             // single char
@@ -272,12 +271,12 @@ pub const Expression = struct {
                             };
                             const first = first_second[0];
                             const second = first_second[1];
-                            assert(first.len > 0);
+                            assert(first.len == 1);
                             std.log.info("set.kind={} values={s} first={s} second={s} raw_range='{s}'", .{ set.kind, set.values, first, second, raw_range });
                             if (second.len == 0) {
                                 try writer.print(
                                     "ParserGenerator.Char(.{}, '{'}')",
-                                    .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{first[0]}) },
+                                    .{ std.zig.fmtId(rule), std.zig.fmtEscapes(first) },
                                 );
                             } else {
                                 assert(second.len == 1);
@@ -285,18 +284,18 @@ pub const Expression = struct {
                                     "ParserGenerator.CharRange(.{}, '{'}', '{'}')",
                                     .{
                                         std.zig.fmtId(rule),
-                                        std.zig.fmtEscapes(&.{first[0]}),
-                                        std.zig.fmtEscapes(&.{second[0]}),
+                                        std.zig.fmtEscapes(first),
+                                        std.zig.fmtEscapes(second),
                                     },
                                 );
                             }
                         }
 
-                        if (set.kind == .negative) try writer.writeAll(")");
                         if (count > 1) try writer.writeByte(',');
                     }
                     if (count > 1)
                         try writer.writeAll("})");
+                    if (set.kind == .negative) try writer.writeAll(")");
                 },
                 .group => |group| {
                     try writer.print("ParserGenerator.Group(.{}, .{{", .{std.zig.fmtId(rule)});
