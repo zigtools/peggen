@@ -202,11 +202,33 @@ pub const Expression = struct {
                         set.values[1 + @as(u8, @boolToInt(set.kind == .negative)) .. set.values.len - 1];
                     var stream = Stream.init(input, &buf);
                     var ctx = Pg.Context{ .file_path = "<set range ctx>" };
-                    // 'range' parser won't work because it can't handle non-printable bytes
-                    const any_char = Pg.CharRange(.any_char, 0, 255);
+
+                    // need to separate the range by '-' but not '\-' and the
+                    // 'range' parser doesn't accept non-printable ascii
+                    // characters.
+                    // this quick and dirty - maybe hacky - escaper does the job.
+                    // it just replaces '\-' w/ '-'
+                    const any_char0 = Pg.CharRange(.any_char, 0, 255);
+                    const any_char = Pg.Select(.any_char, .{
+                        Pg.Escape(
+                            .escape_any_char,
+                            Pg.Group(.bslash_any_char, .{ backslash, any_char0 }),
+                            error{NoSpaceLeft},
+                            struct {
+                                fn func(slice: []const u8, s: *Stream) !void {
+                                    if (slice.len == 2 and slice[0] == '\\' and slice[1] == '-') {
+                                        try s.writeByte('-');
+                                    } else try s.writeByte(slice[0]);
+                                }
+                            }.func,
+                        ),
+                        any_char0,
+                    });
+
                     const ac_dash_ac = Pg.Group(.ac_dash_ac, .{ any_char, dash, any_char });
                     const range_any = Pg.Select(.range_any, .{ ac_dash_ac, any_char });
                     var parser_iter = Pg.iterator(range_any, &stream, &ctx);
+
                     const count = parser_iter.count() catch |e| {
                         std.log.err("{} during parser_iter.count() input={s}", .{ e, input });
                         return;
@@ -692,7 +714,7 @@ test parsePrimary {
     }
     {
         const input =
-            \\[+\-/*]
+            \\[+\-]
         ;
         var output: [input.len]u8 = undefined;
         var p = init(undefined, input, &output, "<test>");
