@@ -242,7 +242,7 @@ pub fn AnyOf(
 }
 
 pub fn EscapeFn(comptime Err: type) type {
-    return fn ([]const u8, *usize) Err!u8;
+    return fn ([]const u8, *Stream) Err!void;
 }
 
 pub fn Escape(
@@ -259,10 +259,25 @@ pub fn Escape(
             errdefer stream.flags = flags;
             stream.flags.insert(.suppress_output);
             try parser.match(stream, ctx);
-            var len: usize = 0;
-            const escaped = try escapeFn(stream.input[index..], &len);
             stream.flags = flags;
-            try stream.writeByte(escaped);
+            try escapeFn(stream.input[index..], stream);
+        }
+    };
+}
+
+pub fn Not(
+    comptime rule: @TypeOf(.enum_literal),
+    comptime parser: anytype,
+) type {
+    return struct {
+        pub const rule_name = @tagName(rule);
+        pub fn match(stream: *Stream, ctx: *Context) Error!void {
+            const state = stream.checkpoint();
+            errdefer stream.restore(state);
+
+            if (parser.match(stream, ctx)) |_|
+                return error.ParseFailure
+            else |_| {}
         }
     };
 }
@@ -415,4 +430,12 @@ test Positive {
     const p1 = Group(.primary1, .{ ident, Positive(.not_leftarrow, leftarrow) });
     try expectFailure("foo--", p1, error.ParseFailure);
     try expectParse("foo<----", p1, "<----");
+}
+
+test Not {
+    const dash = Char(.dash, '-');
+    const slash = Char(.slash, '\\');
+    const not_slash_dash = Group(.not_slash_dash, .{ Not(.not_slash, slash), dash });
+    try expectParse("-", not_slash_dash, "");
+    try expectFailure("\\-", not_slash_dash, error.ParseFailure);
 }

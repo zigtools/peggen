@@ -101,10 +101,6 @@ pub const Expression = struct {
                     unreachable;
             },
             .set => |s| {
-                _ = try writer.write(switch (s.kind) {
-                    .positive => "",
-                    .negative => "!",
-                });
                 try writer.print("[{set}]", .{std.fmt.Formatter(formatEscapes){
                     .data = s.values[1 .. s.values.len - 1],
                 }});
@@ -186,7 +182,7 @@ pub const Expression = struct {
                     } else if (str[0] == '"') {
                         if (str.len == 3)
                             try writer.print(
-                                "ParserGenerator.Char(.{}, '{}')",
+                                "ParserGenerator.Char(.{}, \"{}\")",
                                 .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{str[1]}) },
                             )
                         else
@@ -195,17 +191,24 @@ pub const Expression = struct {
                                 .{ std.zig.fmtId(rule), std.zig.fmtEscapes(str[1 .. str.len - 1]) },
                             );
                     } else {
-                        std.log.err("invalid string starting character '{c}'. expected single or double quote.", .{str[0]});
+                        std.log.err("invalid string starting character '{c}'. expected ' or \".", .{str[0]});
                         return;
                     }
                 },
                 .set => |set| {
-                    var buf: [0x1000]u8 = undefined;
-                    var stream = Stream.init(set.values[1 .. set.values.len - 1], &buf);
+                    var buf: [16]u8 = undefined;
+                    // trim off leading '[^' and trailing ']'
+                    const input =
+                        set.values[1 + @as(u8, @boolToInt(set.kind == .negative)) .. set.values.len - 1];
+                    var stream = Stream.init(input, &buf);
                     var ctx = Pg.Context{ .file_path = "<set range ctx>" };
-                    var parser_iter = Pg.iterator(range, &stream, &ctx);
+                    // 'range' parser won't work because it can't handle non-printable bytes
+                    const any_char = Pg.CharRange(.any_char, 0, 255);
+                    const ac_dash_ac = Pg.Group(.ac_dash_ac, .{ any_char, dash, any_char });
+                    const range_any = Pg.Select(.range_any, .{ ac_dash_ac, any_char });
+                    var parser_iter = Pg.iterator(range_any, &stream, &ctx);
                     const count = parser_iter.count() catch |e| {
-                        std.log.err("{} during parser_iter.count() ", .{e});
+                        std.log.err("{} during parser_iter.count() input={s}", .{ e, input });
                         return;
                     };
                     parser_iter.reset();
@@ -221,37 +224,55 @@ pub const Expression = struct {
                             );
                             return;
                         } orelse break;
-                        var iter = mem.split(u8, raw_range, "-");
-                        const first = iter.next();
-                        const second = iter.next();
-                        assert(first != null);
-                        assert(first.?.len == 1);
-                        std.log.info("set.kind={} values={s}", .{ set.kind, set.values });
-                        if (set.kind == .negative)
-                            try writer.print("ParserGenerator.Not(.{}, ", .{std.zig.fmtId(rule)});
 
-                        if (second == null) {
+                        if (set.kind == .negative) {
+                            try writer.print("ParserGenerator.Not(.{}, ", .{std.zig.fmtId(rule)});
+                        }
+
+                        if (raw_range.len == 1) {
+                            // single char
                             try writer.print(
                                 "ParserGenerator.Char(.{}, '{'}')",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{first.?[0]}) },
+                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{raw_range[0]}) },
                             );
                         } else {
-                            assert(second.?.len == 1);
-                            try writer.print(
-                                "ParserGenerator.CharRange(.{}, '{'}', '{'}')",
-                                .{
-                                    std.zig.fmtId(rule),
-                                    std.zig.fmtEscapes(&.{first.?[0]}),
-                                    std.zig.fmtEscapes(&.{second.?[0]}),
+                            // must be either range of 2 chars or escaped dash.
+                            const first_second: [2][]const u8 = switch (raw_range.len) {
+                                2 => blk: {
+                                    assert(raw_range[0] == '\\');
+                                    break :blk .{ raw_range[1..], "" };
                                 },
-                            );
+                                3 => blk: {
+                                    assert(raw_range[1] == '-');
+                                    break :blk .{ raw_range[0..1], raw_range[2..3] };
+                                },
+                                else => unreachable,
+                            };
+                            const first = first_second[0];
+                            const second = first_second[1];
+                            assert(first.len > 0);
+                            std.log.info("set.kind={} values={s} first={s} second={s} raw_range='{s}'", .{ set.kind, set.values, first, second, raw_range });
+                            if (second.len == 0) {
+                                try writer.print(
+                                    "ParserGenerator.Char(.{}, '{'}')",
+                                    .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{first[0]}) },
+                                );
+                            } else {
+                                assert(second.len == 1);
+                                try writer.print(
+                                    "ParserGenerator.CharRange(.{}, '{'}', '{'}')",
+                                    .{
+                                        std.zig.fmtId(rule),
+                                        std.zig.fmtEscapes(&.{first[0]}),
+                                        std.zig.fmtEscapes(&.{second[0]}),
+                                    },
+                                );
+                            }
                         }
-                        if (set.kind == .negative)
-                            try writer.writeAll(")");
 
+                        if (set.kind == .negative) try writer.writeAll(")");
                         if (count > 1) try writer.writeByte(',');
                     }
-                    // }
                     if (count > 1)
                         try writer.writeAll("})");
                 },
@@ -416,7 +437,10 @@ fn formatEscapes(
     const is_single = fmt.len == 1 and fmt[0] == '\'';
     const is_double = fmt.len == 0;
 
-    for (bytes) |byte| {
+    var i: usize = 0;
+
+    while (i < bytes.len) : (i += 1) {
+        const byte = bytes[i];
         switch (byte) {
             0x07 => try writer.writeAll("\\a"),
             0x08 => try writer.writeAll("\\b"),
@@ -430,7 +454,11 @@ fn formatEscapes(
             ']' => try writer.writeAll(if (is_set) "\\]" else "]"),
             '\'' => try writer.writeAll(if (is_single) "\\'" else "'"),
             '"' => try writer.writeAll(if (is_double) "\\\"" else "\""),
-            '\\' => try writer.writeAll("\\\\"),
+            // prevent double escaping escaped dash in square sets
+            '\\' => if (is_set and i + 1 < bytes.len and bytes[i + 1] == '-') {
+                try writer.writeAll("\\-");
+                i += 1;
+            } else try writer.writeAll("\\\\"),
             ' ',
             '!',
             '#'...'&',
@@ -438,6 +466,7 @@ fn formatEscapes(
             ']' + 1...'~',
             => try writer.writeByte(byte),
             else => {
+                // try writer.print("{}", .{byte});
                 try writer.writeByte('\\');
                 try std.fmt.formatInt(byte, 8, .lower, .{ .width = 2, .fill = '0' }, writer);
             },
@@ -445,36 +474,37 @@ fn formatEscapes(
     }
 }
 
-pub fn parseEscapeSequence(slice: []const u8, len: *usize) !u8 {
+pub fn parseEscapeSequence(slice: []const u8, stream: *Stream) !void {
     if (slice.len < 2) return error.InvalidEscape;
     assert(slice[0] == '\\');
 
-    var skiplen: u8 = 2;
-    defer len.* += skiplen;
-    return switch (slice[1]) {
-        'a' => 0x07,
-        'b' => 0x08,
-        'e' => 0x1B,
-        'f' => 0x0C,
-        'n' => '\n',
-        'r' => '\r',
-        't' => '\t',
-        'v' => 0x0B,
-        '\'' => '\'',
-        '"' => '"',
-        '[' => '[',
-        ']' => ']',
-        '\\' => '\\',
-        '-' => '-',
+    const output: []const u8 = switch (slice[1]) {
+        'a' => &.{0x07},
+        'b' => &.{0x08},
+        'e' => &.{0x1B},
+        'f' => &.{0x0C},
+        'n' => "\n",
+        'r' => "\r",
+        't' => "\t",
+        'v' => &.{0x0B},
+        '\'' => "\'",
+        '"' => "\"",
+        '[' => "[",
+        ']' => "]",
+        '\\' => "\\",
+        '-' => "\\-",
 
         '0'...'7' => blk: {
-            const octstr = slice[1..4];
+            const len = for (slice[2..], 2..) |c, i| {
+                if (!('0' <= c and c <= '7')) break i;
+            } else slice.len;
+            const octstr = slice[1..len];
             const oct = try std.fmt.parseUnsigned(u8, octstr, 8);
-            skiplen += 2;
-            break :blk oct;
+            break :blk &.{oct};
         },
-        else => error.InvalidEscape,
+        else => return error.InvalidEscape,
     };
+    _ = try stream.write(output);
 }
 
 /// Char    <- '\\' [abefnrtv'"\[\]\\]
@@ -501,7 +531,7 @@ const char = Pg.Select(.char, .{
                 Pg.Group(.char4, .{ backslash, dash }),
             },
         ),
-        error{ Overflow, InvalidCharacter, InvalidEscape },
+        error{ Overflow, InvalidCharacter, InvalidEscape, NoSpaceLeft },
         parseEscapeSequence,
     ),
     Pg.Group(.char5, .{ Pg.Negative(.char5_1, backslash), dot }),
@@ -509,7 +539,7 @@ const char = Pg.Select(.char, .{
 });
 
 /// Range   <- Char '-' Char / Char
-const dash = Pg.Char(.lbrace, '-');
+const dash = Pg.Char(.dash, '-');
 const range1 = Pg.Group(.char_dash_char, .{ char, dash, char });
 const range = Pg.Select(.range, .{ range1, char });
 const lbrace = Pg.Char(.lbrace, '[');
@@ -535,6 +565,18 @@ test parseClass {
         var p = init(undefined, input, &output, "<test>");
         const r = try p.parseClass();
         try testing.expectEqualStrings(input, r);
+    }
+    {
+        const input = "[ab-z]";
+        var output: [input.len]u8 = undefined;
+        var p = init(undefined, input, &output, "<test>");
+        const r = try p.parseClass();
+        try testing.expectEqualStrings(input, r);
+        var stream = Stream.init(input[1 .. input.len - 1], &output);
+        var ctx = Pg.Context{ .file_path = "<test>" };
+        var iter = Pg.iterator(range, &stream, &ctx);
+        try testing.expectEqualStrings("a", (try iter.next()).?);
+        try testing.expectEqualStrings("b-z", (try iter.next()).?);
     }
     {
         const input =
@@ -645,6 +687,29 @@ test parsePrimary {
         const e = try p.parsePrimary();
         try testing.expect(e.body == .set);
         try testing.expect(e.body.set.kind == .negative);
+        var buf: [10]u8 = undefined;
+        try testing.expectEqualStrings("[^a-z]", try std.fmt.bufPrint(&buf, "{}", .{e}));
+    }
+    {
+        const input =
+            \\[+\-/*]
+        ;
+        var output: [input.len]u8 = undefined;
+        var p = init(undefined, input, &output, "<test>");
+        const r = try p.parsePrimary();
+        try testing.expectEqualStrings(input, r.body.set.values);
+        var buf: [10]u8 = undefined;
+        try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{set}", .{r}));
+    }
+    {
+        const input =
+            \\[\200-\277]
+        ;
+        var output: [input.len]u8 = undefined;
+        var p = init(undefined, input, &output, "<test>");
+        const e = try p.parsePrimary();
+        var buf: [20]u8 = undefined;
+        try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{e}));
     }
 }
 
