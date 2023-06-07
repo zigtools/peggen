@@ -1,6 +1,10 @@
 const std = @import("std");
 const mem = std.mem;
 const Stream = @import("Stream.zig");
+const isa = @import("isa.zig");
+const Insn = isa.Insn;
+const Program = isa.Program;
+const optimize = @import("optimize.zig");
 
 pub const Context = struct {
     file_path: []const u8,
@@ -239,20 +243,288 @@ pub const Pattern = union(enum) {
     pub fn get(p: Ptr) Ptr {
         return optimize.get(p);
     }
-            _ = try stream.write(expected);
+
+    pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound }!Program {
+        std.debug.print("compile {s}\n", .{@tagName(p)});
+        switch (p) {
+            .grammar => |n| {
+                // try n.inline(allocator); // TODO
+                const Used = std.StringHashMap(void);
+                var used = Used.init(allocator);
+                defer used.deinit();
+                var iter = n.defs.iterator();
+                while (iter.next()) |e| {
+                    const v = e.value_ptr;
+                    const W = struct {
+                        used: *Used,
+                        fn walk(w: @This(), pat: Ptr) !void {
+                            std.debug.print("walk {s} {} {}\n", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
+                            if (pat.* == .non_term) {
+                                if (pat.non_term.inlined == null)
+                                    try w.used.put(pat.non_term.name, {});
+                            }
                         }
                     };
+                    var w = W{ .used = &used };
+                    try walk(v, true, W, w);
                 }
 
-pub fn Select(comptime rule: @TypeOf(.enum_literal), comptime parsers: anytype) type {
-    return struct {
-        pub const rule_name = @tagName(rule);
-        pub fn match(stream: *Stream, ctx: *Context) Error!void {
-            const state = stream.checkpoint();
+                if (used.count() == 0) return n.defs.get(n.start).?.compile(allocator);
+                var code = Program{};
+                const lend = isa.Label.init();
+                try code.append(allocator, .{ .open_call = .{
+                    .name = n.start,
+                    .insn = .{ .jump = .{ .lbl = lend } },
+                } });
 
-            inline for (parsers) |parser| {
-                if (parser.match(stream, ctx)) |_| return else |_| {}
-                stream.restore(state);
+                var labels = std.StringHashMap(isa.Label).init(allocator);
+                defer labels.deinit();
+                iter.index = 0;
+                while (iter.next()) |e| {
+                    const k = e.key_ptr.*;
+                    const v = e.value_ptr.*;
+                    std.debug.print("grammar compile() key={s}\n", .{k});
+                    if (!mem.eql(u8, k, n.start) and !used.contains(k))
+                        continue;
+                    const label = isa.Label.init();
+                    try labels.put(k, label);
+                    var f = try v.compile(allocator);
+                    try code.append(allocator, label.toInsn());
+                    try code.appendSlice(allocator, try f.toOwnedSlice(allocator));
+                    try code.append(allocator, isa.Insn.init(.ret));
+                }
+                // resolve calls to openCall and do tail call optimization
+                for (0..code.items.len) |i| {
+                    const insn = code.items[i];
+                    if (insn == .open_call) {
+                        const oc = insn.open_call;
+                        const lbl = labels.get(oc.name) orelse
+                            {
+                            std.log.err("label '{s}' not found", .{oc.name});
+                            return error.NotFound;
+                        };
+
+                        // replace this placeholder instruction with a normal call
+                        var replace = isa.Insn.init(.{ .call = .{ .lbl = lbl } });
+                        // if a call is immediately followed by a return, optimize to
+                        // a jump for tail call optimization.
+                        if (optimize.nextInsn(code.items[i + 1 ..])) |next| {
+                            switch (next) {
+                                Insn.init(.ret) => {
+                                    replace = isa.Insn.init(.{ .jump = .{ .lbl = lbl } });
+                                    // remove the return instruction if there is no label referring to it
+                                    if (optimize.nextInsnLabel(code.items[i + 1 ..])) |retidx| {
+                                        code.items[i + 1 + retidx] = isa.Insn.init(.nop);
+                                    }
+                                },
+                                else => {},
+                            }
+
+                            // perform the replacement of the opencall by either a call or jump
+                            code.items[i] = replace;
+                        }
+                    }
+                }
+
+                try code.append(allocator, lend.toInsn());
+
+                return code;
+            },
+            .alt_slice, .seq_slice => unreachable,
+            .seq => |n| {
+                var l = if (n.left) |l| try l.get().compile(allocator) else Program{};
+                var r = if (n.right) |r| try r.get().compile(allocator) else Program{};
+                try l.appendSlice(allocator, try r.toOwnedSlice(allocator));
+                return l;
+            },
+            .non_term => |n| {
+                if (n.inlined) |sp| return sp.compile(allocator);
+                return programFrom(.{ .open_call = .{ .name = n.name } }, allocator);
+            },
+
+            .alt => |n| {
+
+                // optimization: if Left and Right are charsets/single chars, return the union
+                if (n.left != null and n.right != null) {
+                    if (optimize.combine(n.left.?.get(), n.right.?.get())) |set| {
+                        return programFrom(Insn.init(.{ .set = .{ .chars = set } }), allocator);
+                    }
+                }
+
+                var l = if (n.left) |l| try l.get().compile(allocator) else Program{};
+                var r = if (n.right) |r| try r.get().compile(allocator) else Program{};
+
+                const l1 = isa.Label.init();
+
+                // TODO disjoint
+                // optimization: if the right and left nodes are disjoint, we can use
+                // NoChoice variants of the head-fail optimization instructions.
+
+                const l2 = isa.Label.init();
+                var code = try Program.initCapacity(allocator, l.items.len + r.items.len + 5);
+                // TODO
+                // if (disjoint) {
+                // ...
+                // } else {
+                try code.append(allocator, Insn.init(.{ .choice = .{ .lbl = l1 } }));
+                try code.appendSlice(allocator, try l.toOwnedSlice(allocator));
+                try code.append(allocator, Insn.init(.{ .commit = .{ .lbl = l2 } }));
+                // }
+                try code.append(allocator, l1.toInsn());
+                try code.appendSlice(allocator, try r.toOwnedSlice(allocator));
+                try code.append(allocator, l2.toInsn());
+                return code;
+            },
+            .star => |n| {
+                switch (n.*) {
+                    .class => |nn| {
+                        return try programFrom(Insn.init(.{ .span = .{ .chars = nn } }), allocator);
+                    },
+                    .memo => |nn| {
+                        _ = nn;
+                        unreachable;
+                    },
+                    else => {},
+                }
+                var sub = try n.get().compile(allocator);
+                var code = try Program.initCapacity(allocator, sub.items.len + 4);
+                var l1 = isa.Label.init();
+                var l2 = isa.Label.init();
+                try code.append(allocator, Insn.init(.{ .choice = .{ .lbl = l2 } }));
+                try code.append(allocator, l1.toInsn());
+                try code.appendSlice(allocator, try sub.toOwnedSlice(allocator));
+                try code.append(allocator, Insn.init(.{ .partial_commit = .{ .lbl = l1 } }));
+                try code.append(allocator, l2.toInsn());
+                return code;
+            },
+            .plus => |n| {
+                const starp = Pattern{ .star = n.get() };
+                var star = try starp.compile(allocator);
+                errdefer star.deinit(allocator);
+                var sub = try n.get().compile(allocator);
+                errdefer sub.deinit(allocator);
+
+                var code = try Program.initCapacity(allocator, sub.items.len + star.items.len);
+                code.appendSliceAssumeCapacity(try sub.toOwnedSlice(allocator));
+                code.appendSliceAssumeCapacity(try star.toOwnedSlice(allocator));
+                return code;
+            },
+            .optional => |n| {
+                _ = n;
+                unreachable;
+            },
+            .negative => |n| {
+                _ = n;
+                unreachable;
+            },
+            .positive => |n| {
+                _ = n;
+                unreachable;
+            },
+            .not => |n| {
+                _ = n;
+                unreachable;
+            },
+            .cap => |n| {
+                _ = n;
+                unreachable;
+            },
+            .no_cap => |n| {
+                _ = n;
+                unreachable;
+            },
+            .memo => |n| {
+                _ = n;
+                unreachable;
+            },
+            .check => |n| {
+                _ = n;
+                unreachable;
+            },
+            .search => |n| {
+                _ = n;
+                unreachable;
+            },
+            .repeat => |n| {
+                _ = n;
+                unreachable;
+            },
+            .class => |n| {
+                return programFrom(Insn.init(.{ .set = .{ .chars = n } }), allocator);
+            },
+            .char_fn => |n| {
+                _ = n;
+                unreachable;
+            },
+            .literal => |n| {
+                _ = n;
+                unreachable;
+            },
+            .dot => |n| {
+                _ = n;
+                unreachable;
+            },
+            .err => |n| {
+                _ = n;
+                unreachable;
+            },
+            .empty_op => |n| {
+                _ = n;
+                unreachable;
+            },
+            .empty => |n| {
+                _ = n;
+                unreachable;
+            },
+            .escape => |n| {
+                _ = n;
+                unreachable;
+            },
+        }
+        unreachable;
+    }
+
+    // Walk calls fn for every subpattern contained in p. If followInline
+    // is true, Walk will walk over inlined patterns as well.
+    pub fn walk(p: Ptr, followInline: bool, comptime Walker: type, walker: Walker) error{OutOfMemory}!void {
+        try walker.walk(p);
+        switch (p.*) {
+            .alt_slice => unreachable,
+            .seq_slice => unreachable,
+            .alt, .seq => |n| {
+                if (n.left) |l|
+                    try walk(l, followInline, Walker, walker);
+                if (n.right) |r|
+                    try walk(r, followInline, Walker, walker);
+            },
+            .star,
+            .plus,
+            .optional,
+            .not,
+            .negative,
+            .positive,
+            .no_cap,
+            .search,
+            => |n| try walk(n, followInline, Walker, walker),
+            .cap, .memo => |n| try walk(n.patt, followInline, Walker, walker),
+            .check => |n| try walk(n.patt, followInline, Walker, walker),
+            .err => |n| try walk(n.recover, followInline, Walker, walker),
+            .repeat => |n| try walk(n.patt, followInline, Walker, walker),
+            .escape => |n| try walk(n.patt, followInline, Walker, walker),
+            .grammar => |n| {
+                var iter = n.defs.iterator();
+                while (iter.next()) |e|
+                    try walk(e.value_ptr, followInline, Walker, walker);
+            },
+            .non_term => |n| {
+                if (n.inlined != null and followInline) {
+                    try walk(n.inlined.?, followInline, Walker, walker);
+                }
+            },
+            else => {},
+        }
+    }
+
     pub const start_name = "--start--";
 
     pub fn rulesToGrammar(allocator: mem.Allocator, rules: []const Rule, start: []const u8) !Pattern {
@@ -324,24 +596,47 @@ pub fn Select(comptime rule: @TypeOf(.enum_literal), comptime parsers: anytype) 
         return p;
     }
 
-pub fn MoreThanN(
-    comptime rule: @TypeOf(.enum_literal),
-    comptime n: comptime_int,
-    comptime parser: anytype,
-) type {
-    return struct {
-        pub const rule_name = @tagName(rule);
-        pub fn match(stream: *Stream, ctx: *Context) Error!void {
-            inline for (0..n) |_|
-                try parser.match(stream, ctx);
+    pub fn compileAndOptimize(p: Pattern, allocator: mem.Allocator) !Program {
+        const c = try p.compile(allocator);
+        // try optimize(c); // TODO
+        return c;
+    }
 
-            while (true) {
-                const state = stream.checkpoint();
-                parser.match(stream, ctx) catch {
-                    stream.restore(state);
-                    break;
+    pub fn count(p: Pattern) usize {
+        return switch (p) {
+            .alt_slice => unreachable,
+            .seq_slice => unreachable,
+            .grammar => unreachable,
+            .alt, .seq => |n| blk: {
+                const c1 = if (n.left) |l| l.count() else 0;
+                const c2 = if (n.right) |r| r.count() else 0;
+                break :blk c1 + c2;
+            },
+            .star,
+            .plus,
+            .optional,
+            .negative,
+            .positive,
+            .not,
+            .no_cap,
+            .search,
+            => |n| n.count(),
+            .cap => |n| n.patt.count(),
+            .memo => |n| n.patt.count(),
+            .check => |n| n.patt.count(),
+            .repeat => |n| n.patt.count(),
+            .class => 1,
+            .char_fn => 1,
+            .literal => 1,
+            .non_term => 1,
+            .dot => 1,
+            .err => |n| n.recover.count(),
+            .empty_op => 0,
+            .empty => 0,
+            .escape => |n| n.patt.count(),
         };
     }
+
     pub fn deinit(p: *Pattern, allocator: mem.Allocator) void {
         switch (p.*) {
             .alt_slice => unreachable,
