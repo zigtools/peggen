@@ -152,43 +152,43 @@ pub const Expression = struct {
 
             switch (expr.lookahead) {
                 .none => {},
-                .positive => try writer.print("ParserGenerator.Positive(.{}, ", .{std.zig.fmtId(rule)}),
-                .negative => try writer.print("ParserGenerator.Negative(.{}, ", .{std.zig.fmtId(rule)}),
+                .positive => try writer.print("ParserGenerator.Positive(", .{}),
+                .negative => try writer.print("ParserGenerator.Negative(", .{}),
             }
 
             switch (expr.modifier) {
                 .none => {},
-                .optional => try writer.print("ParserGenerator.Optional(.{}, ", .{std.zig.fmtId(rule)}),
-                .zero_or_more => try writer.print("ParserGenerator.ZeroOrMore(.{}, ", .{std.zig.fmtId(rule)}),
-                .one_or_more => try writer.print("ParserGenerator.OneOrMore(.{}, ", .{std.zig.fmtId(rule)}),
+                .optional => try writer.print("ParserGenerator.Optional(", .{}),
+                .zero_or_more => try writer.print("ParserGenerator.ZeroOrMore(", .{}),
+                .one_or_more => try writer.print("ParserGenerator.OneOrMore(", .{}),
             }
 
             switch (expr.body) {
-                .any => try writer.print("ParserGenerator.Any(.{})", .{std.zig.fmtId(rule)}),
-                .identifier => |id| try writer.print("{}", .{std.zig.fmtId(id)}),
+                .any => try writer.print("ParserGenerator.Any(1)", .{}),
+                .identifier => |id| try writer.print(".{{ .non_term = .{{ .name = \"{}\" }} }}", .{std.zig.fmtId(id)}),
                 .string => |str| {
                     assert(str.len > 2);
                     if (str[0] == '\'') {
                         if (str.len == 3)
                             try writer.print(
-                                "ParserGenerator.Char(.{}, '{'}')",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{str[1]}) },
+                                "ParserGenerator.Char('{'}')",
+                                .{std.zig.fmtEscapes(&.{str[1]})},
                             )
                         else
                             try writer.print(
-                                "ParserGenerator.String(.{}, \"{'}\")",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(str[1 .. str.len - 1]) },
+                                "ParserGenerator.String(\"{'}\")",
+                                .{std.zig.fmtEscapes(str[1 .. str.len - 1])},
                             );
                     } else if (str[0] == '"') {
                         if (str.len == 3)
                             try writer.print(
-                                "ParserGenerator.Char(.{}, \"{}\"[0])",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{str[1]}) },
+                                "ParserGenerator.Char(\"{}\"[0])",
+                                .{std.zig.fmtEscapes(&.{str[1]})},
                             )
                         else
                             try writer.print(
-                                "ParserGenerator.String(.{}, \"{}\")",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(str[1 .. str.len - 1]) },
+                                "ParserGenerator.String(\"{}\")",
+                                .{std.zig.fmtEscapes(str[1 .. str.len - 1])},
                             );
                     } else {
                         std.log.err("invalid string starting character '{c}'. expected ' or \".", .{str[0]});
@@ -206,12 +206,9 @@ pub const Expression = struct {
                     // characters.
                     // this quick and dirty - maybe hacky - escaper does the job.
                     // it just replaces '\-' w/ '-'
-                    const any_char0 = Pg.CharRange(.any_char, 0, 255);
-                    const any_char = Pg.Select(.any_char, .{
+                    const any_char = comptime Pg.Select(&.{
                         Pg.Escape(
-                            .escape_any_char,
-                            Pg.Group(.bslash_any_char, .{ backslash, any_char0 }),
-                            error{NoSpaceLeft},
+                            Pg.Group(&.{ backslash, dash }),
                             struct {
                                 fn func(slice: []const u8, s: *Stream) !void {
                                     if (slice.len == 2 and slice[0] == '\\' and slice[1] == '-') {
@@ -220,11 +217,11 @@ pub const Expression = struct {
                                 }
                             }.func,
                         ),
-                        any_char0,
+                        Pg.Any(1),
                     });
 
-                    const ac_dash_ac = Pg.Group(.ac_dash_ac, .{ any_char, dash, any_char });
-                    const range_any = Pg.Select(.range_any, .{ ac_dash_ac, any_char });
+                    const ac_dash_ac = comptime Pg.Group(&.{ any_char, dash, any_char });
+                    const range_any = Pg.Select(&.{ ac_dash_ac, any_char });
                     var stream = Stream.init(input, &buf);
                     var ctx = Pg.Context{ .file_path = "<set range ctx>" };
                     var parser_iter = Pg.iterator(range_any, &stream, &ctx);
@@ -236,10 +233,10 @@ pub const Expression = struct {
                     parser_iter.reset();
 
                     if (set.kind == .negative) {
-                        try writer.print("ParserGenerator.Not(.{}, ", .{std.zig.fmtId(rule)});
+                        try writer.print("ParserGenerator.Not(", .{});
                     }
                     if (count > 1)
-                        try writer.print("ParserGenerator.Select(.{}, .{{", .{std.zig.fmtId(rule)});
+                        try writer.print("ParserGenerator.Select(&.{{", .{});
 
                     while (true) {
                         const raw_range = parser_iter.next() catch |e| {
@@ -253,8 +250,8 @@ pub const Expression = struct {
                         if (raw_range.len == 1) {
                             // single char
                             try writer.print(
-                                "ParserGenerator.Char(.{}, '{'}')",
-                                .{ std.zig.fmtId(rule), std.zig.fmtEscapes(&.{raw_range[0]}) },
+                                "ParserGenerator.Char('{'}')",
+                                .{std.zig.fmtEscapes(&.{raw_range[0]})},
                             );
                         } else {
                             // must be either range of 2 chars or escaped dash.
@@ -275,15 +272,14 @@ pub const Expression = struct {
                             std.log.info("set.kind={} values={s} first={s} second={s} raw_range='{s}'", .{ set.kind, set.values, first, second, raw_range });
                             if (second.len == 0) {
                                 try writer.print(
-                                    "ParserGenerator.Char(.{}, '{'}')",
-                                    .{ std.zig.fmtId(rule), std.zig.fmtEscapes(first) },
+                                    "ParserGenerator.Char('{'}')",
+                                    .{std.zig.fmtEscapes(first)},
                                 );
                             } else {
                                 assert(second.len == 1);
                                 try writer.print(
-                                    "ParserGenerator.CharRange(.{}, '{'}', '{'}')",
+                                    "ParserGenerator.CharRange('{'}', '{'}')",
                                     .{
-                                        std.zig.fmtId(rule),
                                         std.zig.fmtEscapes(first),
                                         std.zig.fmtEscapes(second),
                                     },
@@ -293,19 +289,18 @@ pub const Expression = struct {
 
                         if (count > 1) try writer.writeByte(',');
                     }
-                    if (count > 1)
-                        try writer.writeAll("})");
+                    if (count > 1) try writer.writeAll("})");
                     if (set.kind == .negative) try writer.writeAll(")");
                 },
                 .group => |group| {
-                    try writer.print("ParserGenerator.Group(.{}, .{{", .{std.zig.fmtId(rule)});
+                    try writer.print("ParserGenerator.Group(&.{{", .{});
                     for (group.items) |sub_expr| {
                         try writer.print("{},", .{Formatter{ .expr = sub_expr, .rule = rule }});
                     }
                     try writer.writeAll("})");
                 },
                 .select => |select| {
-                    try writer.print("ParserGenerator.Select(.{}, .{{", .{std.zig.fmtId(rule)});
+                    try writer.print("ParserGenerator.Select(&.{{", .{});
                     for (select.items) |sub_expr| {
                         try writer.print("{},", .{Formatter{ .expr = sub_expr, .rule = rule }});
                     }
@@ -403,44 +398,41 @@ pub const Grammar = struct {
     }
 };
 
-fn runParser(self: *PegParser, comptime parser: anytype) ![]const u8 {
-    return try Pg.parse(parser, &self.stream, &self.ctx);
+fn runParser(self: *PegParser, pattern: Pg.Pattern) ![]const u8 {
+    return try Pg.parse(pattern, &self.stream, &self.ctx);
 }
 
-const alpha = Pg.CharFn(.alpha, std.ascii.isAlphabetic);
-const alpha_num = Pg.CharFn(.alpha, std.ascii.isAlphanumeric);
-const ident_others = Pg.Select(.ident_others, .{Pg.Char(.uscore, '_')});
-const ident_succ = Pg.Select(.identifier, .{ alpha_num, ident_others });
-const ident = Pg.Group(.ident, .{
+const alpha = Pg.CharFn(std.ascii.isAlphabetic);
+const alpha_num = Pg.CharFn(std.ascii.isAlphanumeric);
+const ident_others = Pg.Select(&.{Pg.Char('_')});
+const ident_succ = Pg.Select(&.{ alpha_num, ident_others });
+const ident = Pg.Group(&.{
     alpha,
-    Pg.ZeroOrMore(.many_ident_succ, ident_succ),
+    Pg.ZeroOrMore(ident_succ),
     spacing,
 });
 
-const leftarrow = Pg.Group(.leftarrow, .{ Pg.String(.leftarrow_str, "<-"), spacing });
-const slash = Pg.Group(.slash, .{ Pg.Char(.slash_char, '/'), spacing });
+const leftarrow = Pg.Group(&.{ Pg.String("<-"), spacing });
+const slash = Pg.Group(&.{ Pg.Char('/'), spacing });
 
 /// Spacing   <- (Space / Comment)*
 /// Comment   <- '#' (!EndOfLine .)* EndOfLine
 /// Space   <- ' ' / '\t' / EndOfLine
 /// EndOfLine <- '\r\n' / '\n' / '\r'
-const ws = Pg.CharFn(.ws, std.ascii.isWhitespace);
-const wss = Pg.ZeroOrMore(.wss, ws);
+const ws = Pg.CharFn(std.ascii.isWhitespace);
+const wss = Pg.ZeroOrMore(ws);
 
-const space_or_tab = Pg.AnyOf(.space_or_tab, " \t");
-const nl_or_lf = Pg.AnyOf(.nl_or_lf, "\n\r");
-const end_of_line = Pg.Select(.end_of_line, .{ Pg.String(.eol_rn, "\r\n"), nl_or_lf });
-const space = Pg.Select(.space, .{ space_or_tab, end_of_line });
-const hash = Pg.Char(.hash, '#');
-const comment = Pg.Group(.comment_group, .{
-    Pg.Positive(.hash_look, hash),
-    Pg.ZeroOrMore(
-        .not_eol_star,
-        Pg.Group(.not_eol_any, .{ Pg.Negative(.not_eol, end_of_line), Pg.Any(.not_eol_any) }),
-    ),
+const space_or_tab = Pg.AnyOf(" \t");
+const nl_or_lf = Pg.AnyOf("\n\r");
+const end_of_line = Pg.Select(&.{ Pg.String("\r\n"), nl_or_lf });
+const space = Pg.Select(&.{ space_or_tab, end_of_line });
+const hash = Pg.Char('#');
+const comment = Pg.Group(&.{
+    Pg.Positive(hash),
+    Pg.ZeroOrMore(Pg.Group(&.{ Pg.Negative(end_of_line), Pg.Any(1) })),
     end_of_line,
 });
-pub const spacing = Pg.ZeroOrMore(.spacing, Pg.Select(.space_or_comment, .{ space, comment }));
+pub const spacing = Pg.NoCapture(Pg.ZeroOrMore(Pg.Select(&.{ space, comment })));
 
 /// Print the string as escaped contents of a square set, double-quoted string
 /// or single-quoted string.
@@ -533,44 +525,42 @@ pub fn parseEscapeSequence(slice: []const u8, stream: *Stream) !void {
 ///          / '\\' [0-7][0-7]?
 ///          / '\\' '-'
 ///          / !'\\' .
-const dot = Pg.Group(.dot, .{ Pg.Char(.dot_char, '.'), spacing });
-const backslash = Pg.Char(.backslash, '\\');
-const escapees = Pg.AnyOf(.escapees,
+const dot = Pg.Group(&.{ Pg.Char('.'), spacing });
+const backslash = Pg.Char('\\');
+const escapees = Pg.AnyOf(
     \\abefnrtv'"[]\
 );
-const zero_to_three = Pg.CharRange(.zero_to_three, '0', '3');
-const zero_to_seven = Pg.CharRange(.zero_to_seven, '0', '7');
-const char = Pg.Select(.char, .{
+const zero_to_three = Pg.CharRange('0', '3');
+const zero_to_seven = Pg.CharRange('0', '7');
+const char = Pg.Select(&.{
     Pg.Escape(
-        .escape_char,
         Pg.Select(
-            .escaped_char,
-            .{
-                Pg.Group(.char1, .{ backslash, escapees }),
-                Pg.Group(.char2, .{ backslash, zero_to_three, zero_to_seven, zero_to_seven }),
-                Pg.Group(.char3, .{ backslash, zero_to_seven, Pg.Optional(.char3_1, zero_to_seven) }),
-                Pg.Group(.char4, .{ backslash, dash }),
+            &.{
+                Pg.Group(&.{ backslash, escapees }),
+                Pg.Group(&.{ backslash, zero_to_three, zero_to_seven, zero_to_seven }),
+                Pg.Group(&.{ backslash, zero_to_seven, Pg.Optional(zero_to_seven) }),
+                Pg.Group(&.{ backslash, dash }),
             },
         ),
-        error{ Overflow, InvalidCharacter, InvalidEscape, NoSpaceLeft },
         parseEscapeSequence,
     ),
-    Pg.Group(.char5, .{ Pg.Negative(.char5_1, backslash), dot }),
-    Pg.CharFn(.alphanum, std.ascii.isPrint),
+    Pg.Group(&.{ Pg.Negative(backslash), dot }),
+    Pg.CharFn(std.ascii.isPrint),
 });
 
+const dash = Pg.Char('-');
+const range1 = Pg.Group(&.{ char, dash, char });
 /// Range   <- Char '-' Char / Char
-const dash = Pg.Char(.dash, '-');
-const range1 = Pg.Group(.char_dash_char, .{ char, dash, char });
-const range = Pg.Select(.range, .{ range1, char });
-const lbrace = Pg.Char(.lbrace, '[');
-const rbrace = Pg.Char(.rbrace, ']');
+const range = Pg.Select(&.{ range1, char });
+const lbrace = Pg.Char('[');
+const rbrace = Pg.Char(']');
+
 /// Class <- '[' (!']' Range)* ']' Spacing
 pub fn parseClass(self: *PegParser) ![]const u8 {
-    const class = Pg.Group(.class, .{
+    const class = Pg.Group(&.{
         lbrace,
-        Pg.ZeroOrMore(.class1, Pg.Group(.class1_1, .{
-            Pg.Negative(.not_rbrace, rbrace),
+        Pg.ZeroOrMore(Pg.Group(&.{
+            Pg.Negative(rbrace),
             range,
         })),
         rbrace,
@@ -612,19 +602,17 @@ test parseClass {
     }
 }
 
-const single_quote = Pg.Char(.single_quote, '\'');
-const double_quote = Pg.Char(.double_quote, '"');
+const single_quote = Pg.Char('\'');
+const double_quote = Pg.Char('"');
 const lit_single = Pg.Group(
-    .lit_single,
-    .{ single_quote, Pg.ZeroOrMore(.lit1_1, Pg.Group(.lit1_2, .{
-        Pg.Negative(.lit1_3, single_quote),
+    &.{ single_quote, Pg.ZeroOrMore(Pg.Group(&.{
+        Pg.Negative(single_quote),
         char,
     })), single_quote, spacing },
 );
 const lit_double = Pg.Group(
-    .lit_double,
-    .{ double_quote, Pg.ZeroOrMore(.lit2_1, Pg.Group(.lit2_2, .{
-        Pg.Negative(.lit2_3, double_quote),
+    &.{ double_quote, Pg.ZeroOrMore(Pg.Group(&.{
+        Pg.Negative(double_quote),
         char,
     })), double_quote, spacing },
 );
@@ -632,14 +620,14 @@ const lit_double = Pg.Group(
 /// Literal   <- ['] (!['] Char )* ['] Spacing
 ///            / ["] (!["] Char )* ["] Spacing
 pub fn parseLiteral(self: *PegParser) ![]const u8 {
-    const literal = Pg.Select(.literal, .{ lit_single, lit_double });
+    const literal = Pg.Select(&.{ lit_single, lit_double });
     return try self.runParser(literal);
 }
 
-const lparen = Pg.Char(.lparen, '(');
-const rparen = Pg.Char(.rparen, ')');
-const open = Pg.Group(.open, .{ lparen, spacing });
-const close = Pg.Group(.close, .{ rparen, spacing });
+const lparen = Pg.Char('(');
+const rparen = Pg.Char(')');
+const open = Pg.Group(&.{ lparen, spacing });
+const close = Pg.Group(&.{ rparen, spacing });
 
 /// Primary   <- Identifier !LEFTARROW
 ///      / OPEN Expression CLOSE
@@ -647,8 +635,8 @@ const close = Pg.Group(.close, .{ rparen, spacing });
 ///      / Class
 ///      / DOT
 pub fn parsePrimary(self: *PegParser) anyerror!Expression {
-    const p1 = Pg.Group(.primary1, .{ ident, leftarrow });
-    if (self.runParser(Pg.Positive(.peek_leftarrow, p1))) |_|
+    const p1 = Pg.Group(&.{ ident, leftarrow });
+    if (self.runParser(Pg.Positive(p1))) |_|
         return error.RuleEnd
     else |_| {}
 
@@ -737,10 +725,10 @@ test parsePrimary {
 /// Suffix <- Primary (QUESTION / STAR / PLUS)?
 pub fn parseSuffix(self: *PegParser) !Expression {
     var primary = try self.parsePrimary();
-    const suffix_cont = Pg.Optional(.suffix_cont, Pg.Select(.suffix_cont_char, .{
-        Pg.Group(.question, .{ Pg.Char(.question_char, '?'), spacing }),
-        Pg.Group(.star, .{ Pg.Char(.star_char, '*'), spacing }),
-        Pg.Group(.plus, .{ Pg.Char(.plus_char, '+'), spacing }),
+    const suffix_cont = Pg.Optional(Pg.Select(&.{
+        Pg.Group(&.{ Pg.Char('?'), spacing }),
+        Pg.Group(&.{ Pg.Char('*'), spacing }),
+        Pg.Group(&.{ Pg.Char('+'), spacing }),
     }));
     const cont = self.runParser(suffix_cont) catch unreachable;
     if (cont.len > 0) switch (cont[0]) {
@@ -752,8 +740,9 @@ pub fn parseSuffix(self: *PegParser) !Expression {
     return primary;
 }
 
-const and_ = Pg.Group(.@"and", .{ Pg.Char(.and_char, '&'), spacing });
-const not = Pg.Group(.not, .{ Pg.Char(.not_char, '!'), spacing });
+const and_ = Pg.Group(&.{ Pg.Char('&'), spacing });
+const not = Pg.Group(&.{ Pg.Char('!'), spacing });
+
 /// Prefix <- AND Suffix / NOT Suffix / Suffix
 pub fn parsePrefix(self: *PegParser) !Expression {
     const lookahead: Expression.Lookahead = if (self.runParser(and_)) |_|

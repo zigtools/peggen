@@ -3,22 +3,26 @@ const Stream = @import("Stream.zig");
 const PegParser = @import("PegParser.zig");
 const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
+const generated = @import("../out.zig");
+const Pg = @import("ParserGenerator.zig");
 
 pub fn generate(result: Grammar, writer: anytype) !void {
-    try writer.writeAll(
-        \\pub fn Parser(comptime ParserGenerator: type) type {
-        \\return struct{
+    _ = try writer.write(
+        \\const std = @import("std");
+        \\pub inline fn Rules(comptime ParserGenerator: type, comptime options: struct{eval_branch_quota: usize = 1000},) []const ParserGenerator.Rule {
+        \\@setEvalBranchQuota(options.eval_branch_quota);
+        \\return comptime &.{
+        \\
     );
-
     for (result.rules.items) |rule| {
-        try writer.print("pub const {} = struct {{pub usingnamespace {};}};\n\n", .{
+        try writer.print(".{{\"{}\", {} }},\n", .{
             std.zig.fmtId(rule.identifier),
             Expression.Formatter{ .expr = rule.expression, .rule = rule.identifier },
         });
     }
-
-    try writer.writeAll(
-        \\};}
+    _ = try writer.write(
+        \\}; }
+        \\
     );
 }
 
@@ -43,8 +47,12 @@ fn chopArg(args: *[]const []const u8) ?[]const u8 {
 
 fn usage(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print(fmt ++ "\n", args);
-    std.debug.print("usage: $ peggen <mode> <file.peg> <?outfile.zig> \n", .{});
+    std.debug.print("usage: $ peggen <mode> <file> <?outfile> <?start>\n", .{});
     std.debug.print("  <mode>: {s}\n", .{std.meta.fieldNames(Mode)});
+    std.debug.print("usage examples:\n", .{});
+    std.debug.print("  $ peggen print file.peg # parse and print 'file.peg'\n", .{});
+    std.debug.print("  $ peggen gen   file.peg out.zig # generate a grammar from 'file.peg' and save to 'out.zig'\n", .{});
+    std.debug.print("  $ peggen parse file start # parse 'file' using the grammar in out.zig and starting rule 'start' \n", .{});
     std.os.exit(1);
 }
 
@@ -79,14 +87,27 @@ pub fn main() !void {
                 std.debug.print("{s} <- {}\n", .{ rule.identifier, rule.expression });
         },
         .parse => {
-            const generated_parser = @import("../out.zig");
-            const Pg = @import("ParserGenerator.zig");
-            const p = generated_parser.Parser(Pg);
-            var stream = Stream.init(input, output);
-            var ctx = Pg.Context{ .file_path = pegfilename };
-            ctx.flags.insert(.print_errors);
-            const g = try Pg.parse(p.Grammar, &stream, &ctx);
-            std.debug.print("g={s}\n", .{g});
+            // var stream = Stream.init(input, output);
+            // var ctx = Pg.Context{ .file_path = pegfilename };
+            const rules = comptime generated.Rules(Pg, .{ .eval_branch_quota = 2000 });
+            // const map = std.ComptimeStringMap(Pg.Pattern, rules);
+            // std.debug.print("{?}\n", .{map.get("Expr")});
+            const start = chopArg(&args) orelse
+                usage("missing argument: <?start>", .{});
+            var g = try Pg.Pattern.rulesToGrammar(alloc, rules, start);
+            var iter = g.grammar.defs.iterator();
+            var count: usize = 0;
+            while (iter.next()) |kv| {
+                const c = kv.value_ptr.count();
+                std.debug.print("{s}:{} <- {}\n", .{ kv.key_ptr.*, c, kv.value_ptr.* });
+                count += c;
+            }
+            std.debug.print("count={}\n", .{count});
+            const prog = try g.compileAndOptimize(alloc);
+            std.debug.print("prog.len={}\n", .{prog.items.len});
+            for (prog.items) |insn| {
+                std.debug.print("{}\n", .{insn});
+            }
         },
         .gen => {
             const outfilename = chopArg(&args) orelse
@@ -95,8 +116,7 @@ pub fn main() !void {
             const g = try pegparser.parseGrammar();
             const outfile = try std.fs.cwd().createFile(outfilename, .{});
             defer outfile.close();
-            const generated = try generateFormatted(alloc, g);
-            try outfile.writeAll(generated);
+            try outfile.writeAll(try generateFormatted(alloc, g));
         },
     }
 }
