@@ -4,6 +4,7 @@ const PegParser = @import("PegParser.zig");
 const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
 const Pg = @import("ParserGenerator.zig");
+const Vm = @import("Vm.zig");
 
 pub fn generate(result: Grammar, writer: anytype) !void {
     _ = try writer.write(
@@ -70,17 +71,17 @@ pub fn main() !void {
         usage("missing argument: <mode>", .{});
     const mode = std.meta.stringToEnum(Mode, mode_raw) orelse
         usage("invalid mode: '{s}'", .{mode_raw});
-    const pegfilename = chopArg(&args) orelse
-        usage("missing argument: <file.peg>", .{});
+    const filename = chopArg(&args) orelse
+        usage("missing argument: <file>", .{});
 
-    const pegfile = try std.fs.cwd().openFile(pegfilename, .{});
-    defer pegfile.close();
-    const input = try pegfile.readToEndAlloc(alloc, std.math.maxInt(u32));
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+    const input = try file.readToEndAlloc(alloc, std.math.maxInt(u32));
     var output = try alloc.alloc(u8, input.len);
 
     switch (mode) {
         .print => {
-            var pegparser = PegParser.init(alloc, input, output, pegfilename);
+            var pegparser = PegParser.init(alloc, input, output, filename);
             const g = try pegparser.parseGrammar();
             for (g.rules.items) |rule|
                 std.debug.print("{s} <- {}\n", .{ rule.identifier, rule.expression });
@@ -96,11 +97,16 @@ pub fn main() !void {
             // for (prog.items) |insn| {
             //     std.debug.print("{}\n", .{insn});
             // }
+
+            var vm = try Vm.encode(alloc, prog);
+            var memotbl = .{};
+            const result = try vm.exec(file.seekableStream(), memotbl);
+            _ = result;
         },
         .gen => {
             const outfilename = chopArg(&args) orelse
                 usage("missing argument: <?outfile.zig>", .{});
-            var pegparser = PegParser.init(alloc, input, output, pegfilename);
+            var pegparser = PegParser.init(alloc, input, output, filename);
             const g = try pegparser.parseGrammar();
             const outfile = try std.fs.cwd().createFile(outfilename, .{});
             defer outfile.close();

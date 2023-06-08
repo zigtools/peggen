@@ -42,6 +42,13 @@ pub const Insn = union(enum) {
             .insn => |ii| try writer.print("{}", .{ii}),
         }
     }
+
+    pub fn inner(insn: Insn) Insn_ {
+        return switch (insn) {
+            .insn => |i| i,
+            .open_call => |i| i.insn,
+        };
+    }
 };
 
 pub const Insn_ = union(enum) {
@@ -53,6 +60,8 @@ pub const Insn_ = union(enum) {
     char: u8,
     /// Jump jumps to Lbl.
     jump: Label,
+    // A JumpType instruction is any instruction that refers to a Label.
+    jump_type,
     /// Choice pushes Lbl to the stack and if there is a failure the label will
     /// be popped from the stack and jumped to.
     choice: Label,
@@ -84,7 +93,7 @@ pub const Insn_ = union(enum) {
     fail_twice,
     /// Empty makes a zero-width assertion according to the Op option. We use the
     /// same zero-width assertions that are supported by Go's regexp package.
-    empty,
+    empty: u8,
     /// TestChar consumes the next byte if it matches Byte and jumps to Lbl
     /// otherwise. If the consumption is possible, a backtrack entry referring
     /// to Lbl and the subject position from before consumption is pushed to the
@@ -219,6 +228,8 @@ pub const CheckBegin = struct {
     flag: usize,
 };
 
+pub const Checker = struct {};
+
 pub const CheckEnd = struct {
-    // checker: Checker,
+    checker: Checker,
 };
