@@ -3,7 +3,6 @@ const Stream = @import("Stream.zig");
 const PegParser = @import("PegParser.zig");
 const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
-const generated = @import("../out.zig");
 const Pg = @import("ParserGenerator.zig");
 
 pub fn generate(result: Grammar, writer: anytype) !void {
@@ -87,27 +86,16 @@ pub fn main() !void {
                 std.debug.print("{s} <- {}\n", .{ rule.identifier, rule.expression });
         },
         .parse => {
-            // var stream = Stream.init(input, output);
-            // var ctx = Pg.Context{ .file_path = pegfilename };
+            const generated = @import("../out.zig");
             const rules = comptime generated.Rules(Pg, .{ .eval_branch_quota = 2000 });
-            // const map = std.ComptimeStringMap(Pg.Pattern, rules);
-            // std.debug.print("{?}\n", .{map.get("Expr")});
             const start = chopArg(&args) orelse
                 usage("missing argument: <?start>", .{});
             var g = try Pg.Pattern.rulesToGrammar(alloc, rules, start);
-            var iter = g.grammar.defs.iterator();
-            var count: usize = 0;
-            while (iter.next()) |kv| {
-                const c = kv.value_ptr.count();
-                std.debug.print("{s}:{} <- {}\n", .{ kv.key_ptr.*, c, kv.value_ptr.* });
-                count += c;
-            }
-            std.debug.print("count={}\n", .{count});
             const prog = try g.compileAndOptimize(alloc);
             std.debug.print("prog.len={}\n", .{prog.items.len});
-            for (prog.items) |insn| {
-                std.debug.print("{}\n", .{insn});
-            }
+            // for (prog.items) |insn| {
+            //     std.debug.print("{}\n", .{insn});
+            // }
         },
         .gen => {
             const outfilename = chopArg(&args) orelse

@@ -234,18 +234,12 @@ pub const Pattern = union(enum) {
         }
     }
 
-    fn programFrom(x: Insn, allocator: mem.Allocator) !Program {
-        var result = Program{};
-        try result.append(allocator, x);
-        return result;
-    }
-
     pub fn get(p: Ptr) Ptr {
         return optimize.get(p);
     }
 
     pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound }!Program {
-        std.debug.print("compile {s}\n", .{@tagName(p)});
+        // std.debug.print("compile {s}\n", .{@tagName(p)});
         switch (p) {
             .grammar => |n| {
                 // try n.inline(allocator); // TODO
@@ -258,7 +252,7 @@ pub const Pattern = union(enum) {
                     const W = struct {
                         used: *Used,
                         fn walk(w: @This(), pat: Ptr) !void {
-                            std.debug.print("walk {s} {} {}\n", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
+                            // std.debug.print("walk {s} {} {}\n", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
                             if (pat.* == .non_term) {
                                 if (pat.non_term.inlined == null)
                                     try w.used.put(pat.non_term.name, {});
@@ -272,10 +266,7 @@ pub const Pattern = union(enum) {
                 if (used.count() == 0) return n.defs.get(n.start).?.compile(allocator);
                 var code = Program{};
                 const lend = isa.Label.init();
-                try code.append(allocator, .{ .open_call = .{
-                    .name = n.start,
-                    .insn = .{ .jump = .{ .lbl = lend } },
-                } });
+                try code.append(allocator, Insn.initOpenCall(n.start, .jump, lend));
 
                 var labels = std.StringHashMap(isa.Label).init(allocator);
                 defer labels.deinit();
@@ -283,7 +274,7 @@ pub const Pattern = union(enum) {
                 while (iter.next()) |e| {
                     const k = e.key_ptr.*;
                     const v = e.value_ptr.*;
-                    std.debug.print("grammar compile() key={s}\n", .{k});
+                    // std.debug.print("grammar compile() key={s}\n", .{k});
                     if (!mem.eql(u8, k, n.start) and !used.contains(k))
                         continue;
                     const label = isa.Label.init();
@@ -291,7 +282,7 @@ pub const Pattern = union(enum) {
                     var f = try v.compile(allocator);
                     try code.append(allocator, label.toInsn());
                     try code.appendSlice(allocator, try f.toOwnedSlice(allocator));
-                    try code.append(allocator, isa.Insn.init(.ret));
+                    try code.append(allocator, isa.Insn.init(.ret, {}));
                 }
                 // resolve calls to openCall and do tail call optimization
                 for (0..code.items.len) |i| {
@@ -305,16 +296,16 @@ pub const Pattern = union(enum) {
                         };
 
                         // replace this placeholder instruction with a normal call
-                        var replace = isa.Insn.init(.{ .call = .{ .lbl = lbl } });
+                        var replace = isa.Insn.init(.call, lbl);
                         // if a call is immediately followed by a return, optimize to
                         // a jump for tail call optimization.
                         if (optimize.nextInsn(code.items[i + 1 ..])) |next| {
                             switch (next) {
-                                Insn.init(.ret) => {
-                                    replace = isa.Insn.init(.{ .jump = .{ .lbl = lbl } });
+                                Insn.init(.ret, {}) => {
+                                    replace = isa.Insn.init(.jump, lbl);
                                     // remove the return instruction if there is no label referring to it
                                     if (optimize.nextInsnLabel(code.items[i + 1 ..])) |retidx| {
-                                        code.items[i + 1 + retidx] = isa.Insn.init(.nop);
+                                        code.items[i + 1 + retidx] = isa.Insn.init(.nop, {});
                                     }
                                 },
                                 else => {},
@@ -339,7 +330,7 @@ pub const Pattern = union(enum) {
             },
             .non_term => |n| {
                 if (n.inlined) |sp| return sp.compile(allocator);
-                return programFrom(.{ .open_call = .{ .name = n.name } }, allocator);
+                return isa.programFrom(allocator, Insn.initOpenCall(n.name, .nop, {}));
             },
 
             .alt => |n| {
@@ -347,7 +338,7 @@ pub const Pattern = union(enum) {
                 // optimization: if Left and Right are charsets/single chars, return the union
                 if (n.left != null and n.right != null) {
                     if (optimize.combine(n.left.?.get(), n.right.?.get())) |set| {
-                        return programFrom(Insn.init(.{ .set = .{ .chars = set } }), allocator);
+                        return isa.programFrom(allocator, Insn.init(.set, set));
                     }
                 }
 
@@ -366,9 +357,9 @@ pub const Pattern = union(enum) {
                 // if (disjoint) {
                 // ...
                 // } else {
-                try code.append(allocator, Insn.init(.{ .choice = .{ .lbl = l1 } }));
+                try code.append(allocator, Insn.init(.choice, l1));
                 try code.appendSlice(allocator, try l.toOwnedSlice(allocator));
-                try code.append(allocator, Insn.init(.{ .commit = .{ .lbl = l2 } }));
+                try code.append(allocator, Insn.init(.commit, l2));
                 // }
                 try code.append(allocator, l1.toInsn());
                 try code.appendSlice(allocator, try r.toOwnedSlice(allocator));
@@ -378,7 +369,7 @@ pub const Pattern = union(enum) {
             .star => |n| {
                 switch (n.*) {
                     .class => |nn| {
-                        return try programFrom(Insn.init(.{ .span = .{ .chars = nn } }), allocator);
+                        return try isa.programFrom(allocator, Insn.init(.span, nn));
                     },
                     .memo => |nn| {
                         _ = nn;
@@ -390,10 +381,10 @@ pub const Pattern = union(enum) {
                 var code = try Program.initCapacity(allocator, sub.items.len + 4);
                 var l1 = isa.Label.init();
                 var l2 = isa.Label.init();
-                try code.append(allocator, Insn.init(.{ .choice = .{ .lbl = l2 } }));
+                try code.append(allocator, Insn.init(.choice, l2));
                 try code.append(allocator, l1.toInsn());
                 try code.appendSlice(allocator, try sub.toOwnedSlice(allocator));
-                try code.append(allocator, Insn.init(.{ .partial_commit = .{ .lbl = l1 } }));
+                try code.append(allocator, Insn.init(.partial_commit, l1));
                 try code.append(allocator, l2.toInsn());
                 return code;
             },
@@ -410,12 +401,38 @@ pub const Pattern = union(enum) {
                 return code;
             },
             .optional => |n| {
-                _ = n;
-                unreachable;
+                switch (n.get().*) {
+                    .literal => |s| if (s.len == 3) {
+                        const l1 = isa.Label.init();
+                        return isa.programFromSlice(allocator, &.{
+                            Insn.init(.test_char_no_choice, .{ .byte = s[1], .lbl = l1 }),
+                            l1.toInsn(),
+                        });
+                    },
+                    .class => |c| {
+                        const l1 = isa.Label.init();
+                        return isa.programFromSlice(allocator, &.{
+                            Insn.init(.test_set_no_choice, .{ .chars = c, .lbl = l1 }),
+                            l1.toInsn(),
+                        });
+                    },
+                    else => {},
+                }
+                const a = Pattern{ .alt = .{
+                    .left = n.get(),
+                    .right = null,
+                } };
+                return a.compile(allocator);
             },
             .negative => |n| {
-                _ = n;
-                unreachable;
+                var sub = try n.get().compile(allocator);
+                const l1 = isa.Label.init();
+                var code = try isa.Program.initCapacity(allocator, sub.items.len + 3);
+                code.appendAssumeCapacity(Insn.init(.choice, l1));
+                code.appendSliceAssumeCapacity(try sub.toOwnedSlice(allocator));
+                code.appendAssumeCapacity(Insn.init(.fail_twice, {}));
+                code.appendAssumeCapacity(l1.toInsn());
+                return code;
             },
             .positive => |n| {
                 _ = n;
@@ -450,19 +467,20 @@ pub const Pattern = union(enum) {
                 unreachable;
             },
             .class => |n| {
-                return programFrom(Insn.init(.{ .set = .{ .chars = n } }), allocator);
+                return isa.programFrom(allocator, Insn.init(.set, n));
             },
             .char_fn => |n| {
                 _ = n;
                 unreachable;
             },
             .literal => |n| {
-                _ = n;
-                unreachable;
+                var code = try Program.initCapacity(allocator, n.len - 2);
+                for (n[1 .. n.len - 1]) |c|
+                    code.appendAssumeCapacity(Insn.init(.char, c));
+                return code;
             },
             .dot => |n| {
-                _ = n;
-                unreachable;
+                return isa.programFrom(allocator, Insn.init(.any, n));
             },
             .err => |n| {
                 _ = n;
