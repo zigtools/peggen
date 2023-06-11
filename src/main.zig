@@ -5,6 +5,7 @@ const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
 const Pg = @import("ParserGenerator.zig");
 const Vm = @import("Vm.zig");
+const memo = @import("memo.zig");
 
 pub fn generate(result: Grammar, writer: anytype) !void {
     _ = try writer.write(
@@ -99,9 +100,12 @@ pub fn main() !void {
             // }
 
             var vm = try Vm.encode(alloc, prog);
-            var memotbl = .{};
-            const result = try vm.exec(file.seekableStream(), memotbl);
-            _ = result;
+            // var memotbl = memo.Table{ .none = {} };
+
+            var treetbl = memo.TreeTable{ .tree = .{ .root = null } };
+            var memotbl = memo.Table{ .tree = &treetbl };
+            const result = try vm.exec(file.seekableStream(), &memotbl);
+            std.debug.print("errs: {any}\n", .{result[3].items});
         },
         .gen => {
             const outfilename = chopArg(&args) orelse
