@@ -5,53 +5,200 @@ const Vm = @This();
 const memo = @import("memo.zig");
 const input = @import("input.zig");
 const isa = @import("isa.zig");
+const tree = @import("tree.zig");
+const Interval = memo.Interval;
 
 /// list of charsets
 sets: std.ArrayListUnmanaged(Pg.Charset) = .{},
 /// list of error messages
 errors: std.ArrayListUnmanaged([]const u8) = .{},
 /// list of checker functions
-checkers: void = {}, //: []isa.Checker
+checkers: std.ArrayListUnmanaged(isa.Checker) = .{},
 /// the encoded instructions
 insns: std.ArrayListUnmanaged(u8) = .{},
+allocator: mem.Allocator,
+
+pub fn deinit(vm: *Vm) void {
+    vm.sets.deinit(vm.allocator);
+    vm.errors.deinit(vm.allocator);
+    vm.insns.deinit(vm.allocator);
+    vm.checkers.deinit(vm.allocator);
+}
 
 pub const ParseError = struct {
     message: []const u8,
     pos: usize,
+
+    pub const List = std.ArrayListUnmanaged(ParseError);
+    pub fn format(e: ParseError, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("ParseError: {s}", .{e.message});
+    }
 };
 
 const ExecResult = struct {
     bool,
-    isize,
-    memo.Capture,
-    []const ParseError,
+    usize,
+    ?memo.Capture,
+    ParseError.List,
 };
 
 pub const StackBacktrack = struct {
     ip: usize,
     off: usize,
+    pub fn init(ip: usize, off: usize) StackBacktrack {
+        return .{ .ip = ip, .off = off };
+    }
 };
 
 pub const StackMemo = struct {
-    id: u16,
-    pos: usize,
-    count: usize,
+    id: u16 = 0,
+    pos: usize = 0,
+    count: usize = 0,
 };
 
 pub const StackEntry = struct {
-    stype: u8,
+    type: Type,
     // we could use a union to avoid the space cost but I have found this
     // doesn't impact performance and the space cost itself is quite small
     // because the stack is usually small.
-    ret: usize, // stackRet is reused for stCheck
+    ret: usize = 0, // stackRet is reused for .check
     btrack: StackBacktrack,
-    memo: StackMemo, // stackMemo is reused for stCapt
+    memo: StackMemo = .{}, // stackMemo is reused for .capt
     capt: std.ArrayListUnmanaged(memo.Capture) = .{},
+
+    pub const Type = enum(u8) {
+        ret,
+        btrack,
+        memo,
+        memo_tree,
+        capt,
+        check,
+    };
+
+    pub fn addCapt(se: *StackEntry, allocator: mem.Allocator, capt: []const memo.Capture) !void {
+        try se.capt.appendSlice(allocator, capt);
+    }
 };
 
 pub const Stack = struct {
     entries: std.ArrayListUnmanaged(StackEntry) = .{},
     capt: std.ArrayListUnmanaged(memo.Capture) = .{},
+
+    pub fn deinit(s: *Stack, allocator: mem.Allocator) void {
+        s.entries.deinit(allocator);
+        s.capt.deinit(allocator);
+    }
+
+    pub fn addCapt(s: *Stack, allocator: mem.Allocator, capt: []const memo.Capture) !void {
+        if (s.entries.items.len == 0) {
+            try s.capt.appendSlice(allocator, capt);
+        } else {
+            try s.entries.items[(s.entries.items.len) - 1].addCapt(allocator, capt);
+        }
+    }
+
+    pub fn propCapt(s: *Stack, allocator: mem.Allocator) !void {
+        if (s.entries.items.len == 0) return;
+
+        const top = s.entries.items[(s.entries.items.len) - 1];
+        if (top.capt.items.len > 0) {
+            if (s.entries.items.len == 1) {
+                try s.capt.appendSlice(allocator, top.capt.items);
+            } else {
+                try s.entries.items[(s.entries.items.len) - 2].addCapt(allocator, top.capt.items);
+            }
+        }
+    }
+
+    pub fn reset(
+        s: *Stack,
+    ) void {
+        s.capt.clearRetainingCapacity();
+        // need to complete remake the slice so that the underlying captures can be
+        // released to the garbage collector if the user has no references to them
+        // (unused stack entries shouldn't keep references to those captures).
+        // s.entries = make([]stackEntry, 0, 4)
+        s.entries.clearRetainingCapacity();
+    }
+
+    pub fn push(s: *Stack, allocator: mem.Allocator, ent: StackEntry) !void {
+        try s.entries.append(allocator, ent);
+    }
+
+    // propagate marks whether captures should be propagated up the stack.
+    pub fn pop(s: *Stack, allocator: mem.Allocator, propagate: bool) !?*StackEntry {
+        if (s.entries.items.len == 0)
+            return null;
+
+        const ret = &s.entries.items[s.entries.items.len - 1];
+        s.entries.items.len -= 1;
+
+        // For non-capture entries, propagate the captures upward.
+        // For capture entries, we create a new node with the corresponding
+        // children, and this is manually handled by the caller.
+        if (propagate)
+            try s.addCapt(allocator, ret.capt.items);
+
+        return ret;
+    }
+
+    pub fn peek(s: *Stack) ?*StackEntry {
+        return s.peekn(0);
+    }
+
+    pub fn peekn(s: *Stack, n: usize) ?*StackEntry {
+        if (s.entries.items.len <= n) {
+            return null;
+        }
+        return &s.entries.items[s.entries.items.len - n - 1];
+    }
+
+    pub fn pushRet(s: *Stack, allocator: mem.Allocator, r: usize) !void {
+        try s.push(allocator, .{
+            .type = .ret,
+            .ret = r,
+            .btrack = undefined,
+        });
+    }
+
+    pub fn pushBacktrack(s: *Stack, allocator: mem.Allocator, b: StackBacktrack) !void {
+        try s.push(allocator, .{
+            .type = .btrack,
+            .btrack = b,
+        });
+    }
+
+    pub fn pushMemo(s: *Stack, allocator: mem.Allocator, m: StackMemo) !void {
+        try s.push(allocator, .{
+            .type = .memo,
+            .memo = m,
+        });
+    }
+
+    pub fn pushMemoTree(s: *Stack, allocator: mem.Allocator, m: StackMemo) !void {
+        try s.push(allocator, .{
+            .type = .memo_tree,
+            .memo = m,
+        });
+    }
+
+    pub fn pushCapt(s: *Stack, allocator: mem.Allocator, m: StackMemo) !void {
+        try s.push(allocator, .{
+            .type = .capt,
+            .memo = m,
+        });
+    }
+
+    pub fn pushCheck(s: *Stack, allocator: mem.Allocator, m: StackMemo) !void {
+        // std.log.debug("Stack.pushCheck() m={}", .{m});
+        try s.push(allocator, .{
+            .type = .check,
+            .memo = m,
+            .btrack = undefined,
+        });
+    }
 };
 
 pub fn init() Vm {
@@ -60,15 +207,15 @@ pub fn init() Vm {
 
 // returns the size in bytes of the encoded version of this instruction
 fn size(insn: isa.Insn) usize {
-    var sz: usize = 0;
-    switch (insn.inner()) {
+    var s: usize = 0;
+    switch (insn) {
         .label, .nop => return 0,
-        .jump_type, .check_begin => sz += 4,
-        else => sz += 2,
+        .check_begin => s += 4,
+        else => |n| s += if (n.isJumpType()) 4 else 2,
     }
 
     // handle instructions with extra args
-    switch (insn.inner()) {
+    switch (insn) {
         .memo_open,
         .memo_tree_open,
         .memo_tree_close,
@@ -83,15 +230,15 @@ fn size(insn: isa.Insn) usize {
         .err,
         .check_begin,
         .check_end,
-        => sz += 2,
+        => s += 2,
         else => {},
     }
-
-    return sz;
+    // std.log.debug("size({})={}", .{ insn, s });
+    return s;
 }
 
 /// base instruction set
-const BaseInsn = enum(u8) {
+pub const BaseInsn = enum(u8) {
     char,
     jump,
     choice,
@@ -126,185 +273,204 @@ const BaseInsn = enum(u8) {
     memo_tree,
     memo_tree_close,
     err,
+    none,
+
+    pub fn from(byte: u8) BaseInsn {
+        return @intToEnum(BaseInsn, byte);
+    }
+
+    pub fn fromInsn(insn: isa.Insn) BaseInsn {
+        return switch (insn) {
+            .open_call => unreachable,
+            .char => .char,
+            .jump => .jump,
+            .choice => .choice,
+            .call => .call,
+            .commit => .commit,
+            .ret => .ret,
+            .fail => .fail,
+            .set => .set,
+            .any => .any,
+            .partial_commit => .partial_commit,
+            .span => .span,
+            .back_commit => .back_commit,
+            .fail_twice => .fail_twice,
+            .empty => .empty,
+            .test_char => .test_char,
+            .test_char_no_choice => .test_char_no_choice,
+            .test_set => .test_set,
+            .test_set_no_choice => .test_set_no_choice,
+            .test_any => .test_any,
+            .end => .end,
+            .nop => .nop,
+            .capture_begin => .capture_begin,
+            .capture_late => .capture_late,
+            .capture_end => .capture_end,
+            .capture_full => .capture_full,
+            .check_begin => .check_begin,
+            .check_end => .check_end,
+            .memo_open => .memo_open,
+            .memo_close => .memo_close,
+            .memo_tree_open => .memo_tree_open,
+            .memo_tree_insert => .memo_tree_insert,
+            .memo_tree => .memo_tree,
+            .memo_tree_close => .memo_tree_close,
+            .err, .not_found_error => .err,
+            .label => .none,
+        };
+    }
+
+    fn code(i: BaseInsn) u8 {
+        return @enumToInt(i);
+    }
 };
-
-fn opcode(i: BaseInsn) u8 {
-    return @enumToInt(i);
-}
-
-fn setArgs(args: *std.ArrayList(u8), bytes: []const u8) !void {
-    args.items.len = 0;
-    try args.appendSlice(bytes);
-}
 
 // Encode transforms a program into VM bytecode.
 pub fn encode(allocator: mem.Allocator, insns: isa.Program) !Vm {
-    var code = Vm{};
+    var code = Vm{ .allocator = allocator };
+    errdefer code.deinit();
 
     var bcount: usize = 0;
     var labels = std.AutoHashMap(isa.Label, usize).init(allocator);
+    defer labels.deinit();
     for (insns.items) |insn| {
-        switch (insn.inner()) {
+        switch (insn) {
             .nop => {},
             .label => |n| try labels.put(n, bcount),
             else => bcount += size(insn),
         }
     }
 
-    for (insns.items) |insn| {
-        var op: u8 = undefined;
-        var args = std.ArrayList(u8).init(allocator);
+    var iter = labels.iterator();
+    while (iter.next()) |e|
+        std.log.debug("encode() label {}: {}", .{ e.key_ptr.id, e.value_ptr.* });
 
-        switch (insn.inner()) {
-            .label, .nop => continue,
+    var args = std.ArrayList(u8).init(allocator);
+    defer args.deinit();
+
+    for (insns.items) |insn| {
+        args.items.len = 0;
+        // std.log.debug("encode {}", .{insn});
+        switch (insn) {
+            .label, .nop, .open_call => continue,
             .char => |n| {
-                op = opcode(.char);
-                try setArgs(&args, &.{n});
+                try args.appendSlice(&.{n});
             },
             .jump => |n| {
-                op = opcode(.jump);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
             .choice => |n| {
-                op = opcode(.choice);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
             .call => |n| {
-                op = opcode(.call);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
             .commit => |n| {
-                op = opcode(.commit);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
-            .ret => {
-                op = opcode(.ret);
-            },
-            .fail => {
-                op = opcode(.fail);
-            },
+            .ret => {},
+            .fail => {},
             .set => |n| {
-                op = opcode(.set);
-                try setArgs(&args, &.{encodeU8(try code.addSet(allocator, n))});
+                try args.append(encodeU8(try code.addSet(allocator, n)));
             },
             .any => |n| {
-                op = opcode(.any);
-                try setArgs(&args, &.{n});
+                try args.appendSlice(&.{n});
             },
             .partial_commit => |n| {
-                op = opcode(.partial_commit);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
             .span => |n| {
-                op = opcode(.span);
-                try setArgs(&args, &.{encodeU8(try code.addSet(allocator, n))});
+                try args.append(encodeU8(try code.addSet(allocator, n)));
             },
             .back_commit => |n| {
-                op = opcode(.back_commit);
-                try setArgs(&args, &encodeLabel(labels.get(n).?));
+                try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
-            .fail_twice => {
-                op = opcode(.fail_twice);
-            },
+            .fail_twice => {},
             .empty => |n| {
-                op = opcode(.empty);
-                try setArgs(&args, &.{n});
+                try args.appendSlice(&.{n});
             },
             .test_char => |n| {
-                op = opcode(.test_char);
                 try args.append(n.byte);
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
             },
             .test_char_no_choice => |n| {
-                op = opcode(.test_char_no_choice);
                 try args.append(n.byte);
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
             },
             .test_set => |n| {
-                op = opcode(.test_set);
                 try args.append(encodeU8(try code.addSet(allocator, n.chars)));
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
             },
             .test_set_no_choice => |n| {
-                op = opcode(.test_set_no_choice);
                 try args.append(encodeU8(try code.addSet(allocator, n.chars)));
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
             },
             .test_any => |n| {
-                op = opcode(.test_any);
                 try args.append(n.n);
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
             },
             .capture_begin => |n| {
-                op = opcode(.capture_begin);
-                try setArgs(&args, &encodeU16(n));
+                try args.appendSlice(&encodeU16(n));
             },
-            .capture_end => {
-                op = opcode(.capture_end);
-            },
+            .capture_end => {},
             .capture_late => |n| {
-                op = opcode(.capture_late);
                 try args.append(n.back);
                 try args.appendSlice(&encodeI16(@intCast(isize, n.id)));
             },
             .capture_full => |n| {
-                op = opcode(.capture_full);
                 try args.append(n.back);
                 try args.appendSlice(&encodeI16(@intCast(isize, n.id)));
             },
             .memo_open => |n| {
-                op = opcode(.memo_open);
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
                 try args.appendSlice(&encodeI16(@intCast(isize, n.id)));
             },
-            .memo_close => {
-                op = opcode(.memo_close);
-            },
+            .memo_close => {},
             .memo_tree_open => |n| {
-                op = opcode(.memo_tree_open);
                 try args.appendSlice(&encodeLabel(labels.get(n.lbl).?));
                 try args.appendSlice(&encodeI16(@intCast(isize, n.id)));
             },
-            .memo_tree_insert => {
-                op = opcode(.memo_tree_insert);
-            },
-            .memo_tree => {
-                op = opcode(.memo_tree);
-            },
+            .memo_tree_insert => {},
+            .memo_tree => {},
             .memo_tree_close => |n| {
-                op = opcode(.memo_tree_close);
-                try setArgs(&args, &encodeI16(@intCast(isize, n)));
+                try args.appendSlice(&encodeI16(@intCast(isize, n)));
             },
             .check_begin => |n| {
-                op = opcode(.check_begin);
                 try args.appendSlice(&encodeU16(n.id));
                 try args.appendSlice(&encodeU16(n.flag));
             },
             .check_end => |n| {
-                op = opcode(.check_end);
-                try setArgs(&args, &encodeU24(try code.addChecker(allocator, n.checker)));
+                try args.appendSlice(&encodeU24(try code.addChecker(
+                    allocator,
+                    n,
+                )));
             },
             .err => |n| {
-                op = opcode(.err);
-                try setArgs(&args, &encodeU24(try code.addError(allocator, n)));
+                try args.appendSlice(&encodeU24(try code.addError(allocator, n)));
+            },
+            .not_found_error => |n| {
+                const m = try std.fmt.allocPrint(allocator, "non-terminal '{s}' not found", .{n});
+                try args.appendSlice(&encodeU24(try code.addError(allocator, m)));
             },
             .end => |n| {
-                op = opcode(.end);
-                try setArgs(&args, &.{encodeBool(n.fail)});
+                try args.appendSlice(&.{encodeBool(n.fail)});
             },
-            else => std.debug.panic("invalid instruction during encoding: {}", .{insn}),
+            // else => std.debug.panic("invalid instruction during encoding: {}", .{insn}),
         }
 
-        try code.insns.append(allocator, op);
+        const l = code.insns.items.len;
+        const op = BaseInsn.fromInsn(insn);
+        try code.insns.append(allocator, op.code());
 
         // need padding to align the args if they are divisible by 16 bits
         if (args.items.len % 2 == 0) {
             try code.insns.append(allocator, 0);
         }
 
-        try code.insns.appendSlice(allocator, try args.toOwnedSlice());
+        try code.insns.appendSlice(allocator, args.items);
+        std.log.debug("encoded {} {s} new insns={}", .{ insn, @tagName(op), std.fmt.fmtSliceHexLower(code.insns.items[l..]) });
     }
-    try code.insns.appendSlice(allocator, &.{ opcode(.end), 0 });
+    try code.insns.appendSlice(allocator, &.{ BaseInsn.code(.end), 0 });
 
     return code;
 }
@@ -331,11 +497,12 @@ fn encodeI16(x_: isize) [2]u8 {
     return b;
 }
 
-fn encodeU24(x_: usize) [3]u8 {
-    const x = @intCast(u24, x_);
+fn encodeU24(x: usize) [3]u8 {
+    _ = std.math.cast(u24, x) orelse unreachable;
     var b: [4]u8 = undefined;
     const ii1 = @truncate(u16, (x >> 16) & 0xff);
     const ii2 = @truncate(u16, x);
+    // std.log.debug("encodeU24({}) i1={} i2={}", .{ x, ii1, ii2 });
     mem.writeIntBig(u16, b[0..2], ii1);
     mem.writeIntLittle(u16, b[2..], ii2);
     return b[1..4].*;
@@ -367,40 +534,375 @@ fn addError(code: *Vm, allocator: mem.Allocator, msg: []const u8) !usize {
         if (mem.eql(u8, msg, s)) return i;
     }
 
-    const len = code.sets.items.len;
+    const len = code.errors.items.len;
     try code.errors.append(allocator, msg);
     return len;
 }
 
 fn addChecker(code: *Vm, allocator: mem.Allocator, checker: isa.Checker) !usize {
-    _ = allocator;
-    _ = checker;
-    _ = code;
-    // code.Checkers = append(code.Checkers, checker)
-    // return usize(len(code.Checkers) - 1)
-    unreachable;
+    const len = code.checkers.items.len;
+    try code.checkers.append(allocator, checker);
+    return len;
 }
 
 /// Exec executes the parsing program this virtual machine was created with. It
 /// returns whether the parse was a match, the last position in the subject
 /// string that was matched, and any captures that were created.
-pub fn exec(vm: *Vm, reader: anytype, memtbl: memo.Table) !ExecResult {
+pub fn exec(vm: *Vm, seekable_stream: anytype, memtbl: *memo.Table) !ExecResult {
     var st = Stack{};
-    var src = try input.input(reader);
+    defer st.deinit(vm.allocator);
+    var src = try input.input(seekable_stream);
 
     return vm.execImpl(0, &st, &src, memtbl, null);
 }
 
-fn execImpl(vm: *Vm, ip: usize, st: *Stack, src: anytype, memtbl: memo.Table, interval: ?void) !ExecResult {
-    const idata = vm.insns;
+pub fn sz(i: BaseInsn) u8 {
+    return insn_sizes[@enumToInt(i)];
+}
 
+pub const insn_sizes = std.enums.directEnumArray(BaseInsn, u8, 0, .{
+    // base instruction set
+    .char = 2,
+    .ret = 2,
+    .fail = 2,
+    .set = 2,
+    .any = 2,
+    .span = 2,
+    .fail_twice = 2,
+    .end = 2,
+    .nop = 0,
+    .empty = 2,
+    .capture_begin = 4,
+    .capture_late = 4,
+    .capture_end = 2,
+    .capture_full = 4,
+    .memo_close = 2,
+    .memo_tree_insert = 2,
+    .memo_tree = 2,
+    .memo_tree_close = 4,
+    .check_begin = 6,
+    .check_end = 4,
+    .err = 4,
+
+    // jumps
+    .jump = 4,
+    .choice = 4,
+    .call = 4,
+    .commit = 4,
+    .partial_commit = 4,
+    .back_commit = 4,
+    .test_char = 6,
+    .test_char_no_choice = 6,
+    .test_set = 6,
+    .test_set_no_choice = 6,
+    .test_any = 6,
+    .memo_open = 6,
+    .memo_tree_open = 6,
+    .none = undefined,
+});
+
+fn memoize(
+    allocator: mem.Allocator,
+    id: usize,
+    pos: usize,
+    mlen: isize,
+    count: usize,
+    mcapt: ?*memo.Capture.List,
+    src_: anytype,
+    memtbl_: *memo.Table,
+    iv: ?Interval,
+) !void {
+    if (iv != null) {
+        if (mcapt) |capt| capt.clearRetainingCapacity();
+    }
+    const mexam = @max(src_.furthest, src_.pos()) - pos + 1;
+    try memtbl_.put(allocator, id, pos, mlen, mexam, count, if (mcapt) |c| c.* else .{});
+}
+
+fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, intrvl: ?Interval) !ExecResult {
+    const idata = vm.insns;
+    var ip = ip_;
     if (ip >= idata.items.len) {
-        return .{ true, 0, memo.Capture.initDummy(0, 0, .{}), &.{} };
+        return .{ true, 0, memo.Capture.initDummy(0, 0, .{}), .{} };
     }
 
-    _ = interval;
-    _ = src;
-    _ = st;
-    _ = memtbl;
-    unreachable;
+    var caprange: ?Interval = null;
+
+    if (intrvl) |i| {
+        caprange = i;
+        // Apply an edit that clears all memoized entries in the interval
+        // we are capturing. This ensures that we find all captures in the
+        // requested interval.
+        try memtbl.applyEdit(vm.allocator, .{
+            .start = i.low,
+            .end = i.high,
+            .len = i.high - i.low,
+        });
+    }
+
+    var success = true;
+    var errs = ParseError.List{};
+
+    loop: while (true) {
+        var fail = false;
+        const op = idata.items[ip];
+        const insn = BaseInsn.from(op);
+        std.log.debug("ip={} op={}/.{s}", .{ ip, op, @tagName(insn) });
+        switch (insn) {
+            .end => {
+                const fail_ = decodeU8(idata.items[ip + 1 ..]);
+                success = fail_ != 1;
+                break :loop;
+            },
+
+            .char => {
+                blk: {
+                    if (src.peek()) |in| {
+                        const b = decodeU8(idata.items[ip + 1 ..]);
+                        // std.log.debug("char b={c} in={c}", .{ b, in });
+                        if (b == in) {
+                            _ = try src.advance(1);
+                            ip += sz(.char);
+                            break :blk;
+                        }
+                    }
+                    fail = true;
+                }
+            },
+            .jump => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                ip = lbl;
+            },
+            .choice => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                try st.pushBacktrack(vm.allocator, StackBacktrack.init(lbl, src.pos()));
+                ip += sz(.choice);
+            },
+            .call => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                try st.pushRet(vm.allocator, ip + sz(.call));
+                ip = lbl;
+            },
+            .commit => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                _ = try st.pop(vm.allocator, true);
+                ip = lbl;
+            },
+            .ret => {
+                blk: {
+                    if (try st.pop(vm.allocator, true)) |ent| {
+                        if (ent.type == .ret) {
+                            ip = ent.ret;
+                            break :blk;
+                        }
+                    }
+                    @panic("Return failed");
+                }
+            },
+            .fail => {
+                fail = true;
+            },
+            .set => {
+                const set = decodeSet(idata.items[ip + 1 ..], vm.sets.items);
+                blk: {
+                    if (src.peek()) |in| {
+                        std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), Pg.CharsetFmt.init(set) });
+                        if (set.isSet(in)) {
+                            _ = try src.advance(1);
+                            ip += sz(.set);
+                            break :blk;
+                        }
+                    }
+                    fail = true;
+                }
+            },
+            .any => {
+                const n = decodeU8(idata.items[ip + 1 ..]);
+                if (try src.advance(n)) {
+                    ip += sz(.any);
+                } else {
+                    fail = true;
+                }
+            },
+            .partial_commit => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                const ment = st.peek();
+                blk: {
+                    if (ment) |ent| {
+                        if (ent.type == .btrack) {
+                            ent.btrack.off = src.pos();
+                            try st.propCapt(vm.allocator);
+                            ent.capt.items.len = 0;
+                            ip = lbl;
+                            break :blk;
+                        }
+                    }
+                    @panic("PartialCommit failed");
+                }
+            },
+            .span => {
+                const set = decodeSet(idata.items[ip + 1 ..], vm.sets.items);
+                while (true) {
+                    const in = src.peek() orelse break;
+                    if (!set.isSet(in)) break;
+                    _ = try src.advance(1);
+                }
+                ip += sz(.span);
+            },
+            .back_commit => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                const ent = try st.pop(vm.allocator, true) orelse
+                    @panic("BackCommit failed");
+                if (ent.type == .btrack) {
+                    std.debug.assert(try src.seekTo(ent.btrack.off));
+                    ip = lbl;
+                } else {
+                    @panic("BackCommit failed");
+                }
+            },
+            .fail_twice => {
+                _ = try st.pop(vm.allocator, false);
+                fail = true;
+            },
+            .test_char => {
+                blk: {
+                    const lbl = decodeU24(idata.items[ip + 3 ..]);
+                    const b = decodeU8(idata.items[ip + 2 ..]);
+                    if (src.peek()) |in| {
+                        if (in == b) {
+                            try st.pushBacktrack(vm.allocator, StackBacktrack.init(lbl, src.pos()));
+                            _ = try src.advance(1);
+                            ip += sz(.test_char);
+                            break :blk;
+                        }
+                    }
+                    ip = lbl;
+                }
+            },
+            .test_char_no_choice => {
+                blk: {
+                    const b = decodeU8(idata.items[ip + 2 ..]);
+                    if (src.peek()) |in| {
+                        if (in == b) {
+                            _ = try src.advance(1);
+                            ip += sz(.test_char_no_choice);
+                            break :blk;
+                        }
+                    }
+                    const lbl = decodeU24(idata.items[ip + 3 ..]);
+                    ip = lbl;
+                }
+            },
+            .test_set => {
+                const lbl = decodeU24(idata.items[ip + 3 ..]);
+                const set = decodeSet(idata.items[ip + 2 ..], vm.sets.items);
+                blk: {
+                    if (src.peek()) |in| {
+                        if (set.isSet(in)) {
+                            try st.pushBacktrack(vm.allocator, StackBacktrack.init(lbl, src.pos()));
+                            _ = try src.advance(1);
+                            ip += sz(.test_set);
+                            break :blk;
+                        }
+                    }
+                    ip = lbl;
+                }
+            },
+            .check_begin => {
+                const id = decodeI16(idata.items[ip + 2 ..]);
+                const flag = decodeI16(idata.items[ip + 4 ..]);
+                try st.pushCheck(vm.allocator, .{
+                    .id = @intCast(u16, id),
+                    .count = @intCast(u16, flag),
+                    .pos = src.pos(),
+                });
+                ip += sz(.check_begin);
+            },
+            .check_end => {
+                const ent = try st.pop(vm.allocator, true) orelse
+                    @panic("check end needs check stack entry");
+                if (ent.type != .check)
+                    @panic("check end needs check stack entry");
+                const checkid = decodeU24(idata.items[ip + 1 ..]);
+                const checker = vm.checkers.items[checkid];
+
+                const id = @intCast(u32, ent.memo.id);
+                const flag = @intCast(u32, ent.memo.count);
+                const func = @ptrCast(isa.CheckerFn, checker.func);
+                var buf: [0x100]u8 = undefined;
+                const n = func(checker.ptr, try src.slice(ent.memo.pos, src.pos(), &buf), src, id, flag);
+                if (n == -1) {
+                    fail = true;
+                } else {
+                    _ = try src.advance(@bitCast(usize, n));
+                }
+
+                ip += sz(.check_end);
+            },
+            else => std.debug.panic("Invalid opcode {}", .{op}),
+        }
+
+        if (fail) {
+            while (true) {
+                std.log.debug("fail={} stack.len={}", .{ fail, st.entries.items.len });
+                const stack_entry = (try st.pop(vm.allocator, false)) orelse {
+                    // match failed
+                    return .{ false, src.pos(), null, errs };
+                };
+                std.log.debug("stack_entry.type=.{s}", .{@tagName(stack_entry.type)});
+
+                switch (stack_entry.type) {
+                    .btrack => {
+                        // std.log.debug("btrack={}", .{stack_entry.btrack});
+                        ip = stack_entry.btrack.ip;
+                        _ = try src.seekTo(stack_entry.btrack.off);
+                        stack_entry.capt.clearRetainingCapacity();
+                        break;
+                    },
+                    .memo => {
+                        // Mark this position in the memoTable as a failed match
+                        try memoize(vm.allocator, stack_entry.memo.id, stack_entry.memo.pos, -1, 0, null, src, memtbl, intrvl);
+
+                        stack_entry.capt.clearRetainingCapacity();
+                    },
+                    .ret, .capt, .check => {
+                        stack_entry.capt.clearRetainingCapacity();
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+    if (intrvl != null) {
+        const caprg = caprange orelse unreachable;
+        return .{ success, src.pos(), memo.Capture.initDummy(caprg.low, caprg.high - caprg.low, st.capt), errs };
+    }
+    return .{ success, src.pos(), memo.Capture.initDummy(0, src.pos(), st.capt), errs };
+}
+
+fn decodeU8(b: []const u8) u8 {
+    return b[0];
+}
+
+fn decodeI8(b: []const u8) i8 {
+    return @bitCast(i8, b[0]);
+}
+
+fn decodeU16(b: []const u8) u16 {
+    return mem.readIntLittle(u16, b[0..2]);
+}
+
+fn decodeI16(b: []const u8) i16 {
+    return mem.readIntLittle(i16, b[0..2]);
+}
+
+fn decodeU24(b: []const u8) u32 {
+    const ii1 = @as(u32, decodeU8(b));
+    const ii2 = @as(u32, decodeU16(b[1..]));
+    return (ii1 << 16) | ii2;
+}
+
+fn decodeSet(b: []const u8, sets: []const Pg.Charset) Pg.Charset {
+    const i = decodeU8(b);
+    return sets[i];
 }
