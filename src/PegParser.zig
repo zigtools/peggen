@@ -32,7 +32,7 @@ pub const Expression = struct {
         any,
         identifier: []const u8,
         /// "characters" 'characters'
-        string: []const u8,
+        string: String,
         /// [a-zA-Z_] [^0-9]
         set: Set,
         /// (abc def)
@@ -40,6 +40,21 @@ pub const Expression = struct {
         /// abc / def / gej
         select: std.ArrayListUnmanaged(Expression),
 
+        pub const String = struct {
+            quote_kind: QuoteKind,
+            slice: []const u8,
+
+            pub fn initFromQuoted(quoted: []const u8) String {
+                assert(quoted.len > 1 and
+                    (quoted[0] == '\'' and quoted[quoted.len - 1] == '\'') or
+                    (quoted[0] == '"' and quoted[quoted.len - 1] == '"'));
+                return .{
+                    .slice = quoted[1 .. quoted.len - 1],
+                    .quote_kind = @intToEnum(QuoteKind, quoted[0]),
+                };
+            }
+        };
+        pub const QuoteKind = enum(u8) { single = '\'', double = '"' };
         pub const Tag = std.meta.Tag(Body);
     };
 
@@ -88,14 +103,14 @@ pub const Expression = struct {
             .any => try writer.writeByte('.'),
             .identifier => |s| _ = try writer.write(s),
             .string => |s| {
-                assert(s.len > 1);
-                if (s[0] == '\'')
+                assert(s.slice.len > 0);
+                if (s.quote_kind == .single)
                     try writer.print("'{'}'", .{std.fmt.Formatter(formatEscapes){
-                        .data = s[1 .. s.len - 1],
+                        .data = s.slice,
                     }})
-                else if (s[0] == '"')
+                else if (s.quote_kind == .double)
                     try writer.print("\"{}\"", .{std.fmt.Formatter(formatEscapes){
-                        .data = s[1 .. s.len - 1],
+                        .data = s.slice,
                     }})
                 else
                     unreachable;
@@ -167,32 +182,29 @@ pub const Expression = struct {
                 .any => try writer.print("ParserGenerator.Any(1)", .{}),
                 .identifier => |id| try writer.print(".{{ .non_term = .{{ .name = \"{}\" }} }}", .{std.zig.fmtId(id)}),
                 .string => |str| {
-                    assert(str.len > 2);
-                    if (str[0] == '\'') {
-                        if (str.len == 3)
+                    assert(str.slice.len > 0);
+                    if (str.quote_kind == .single) {
+                        if (str.slice.len == 1)
                             try writer.print(
                                 "ParserGenerator.Char('{'}')",
-                                .{std.zig.fmtEscapes(&.{str[1]})},
+                                .{std.zig.fmtEscapes(str.slice[0..1])},
                             )
                         else
                             try writer.print(
                                 "ParserGenerator.String(\"{'}\")",
-                                .{std.zig.fmtEscapes(str[1 .. str.len - 1])},
+                                .{std.zig.fmtEscapes(str.slice)},
                             );
-                    } else if (str[0] == '"') {
-                        if (str.len == 3)
+                    } else if (str.quote_kind == .double) {
+                        if (str.slice.len == 1)
                             try writer.print(
                                 "ParserGenerator.Char(\"{}\"[0])",
-                                .{std.zig.fmtEscapes(&.{str[1]})},
+                                .{std.zig.fmtEscapes(str.slice[0..1])},
                             )
                         else
                             try writer.print(
                                 "ParserGenerator.String(\"{}\")",
-                                .{std.zig.fmtEscapes(str[1 .. str.len - 1])},
+                                .{std.zig.fmtEscapes(str.slice)},
                             );
-                    } else {
-                        std.log.err("invalid string starting character '{c}'. expected ' or \".", .{str[0]});
-                        return;
                     }
                 },
                 .set => |set| {
@@ -432,7 +444,7 @@ const comment = Pg.Group(&.{
     Pg.ZeroOrMore(Pg.Group(&.{ Pg.Negative(end_of_line), Pg.Any(1) })),
     end_of_line,
 });
-pub const spacing = Pg.NoCapture(Pg.ZeroOrMore(Pg.Select(&.{ space, comment })));
+pub const spacing = Pg.Ignore(Pg.ZeroOrMore(Pg.Select(&.{ space, comment })));
 
 /// Print the string as escaped contents of a square set, double-quoted string
 /// or single-quoted string.
@@ -660,7 +672,7 @@ pub fn parsePrimary(self: *PegParser) anyerror!Expression {
         return .{ .body = .{ .set = .{ .values = s, .kind = kind } } };
     } else |_| if (self.parseLiteral()) |s| {
         std.log.debug("parsePrimary() literal={s}", .{s});
-        return .{ .body = .{ .string = s } };
+        return .{ .body = .{ .string = Expression.Body.String.initFromQuoted(s) } };
     } else |_| if (self.runParser(dot)) |_| {
         std.log.debug("parsePrimary() dot", .{});
         return .{ .body = .any };
@@ -866,7 +878,6 @@ test parseDefinition {
         var r = try p.parseDefinition();
         defer r.expression.deinit(testing.allocator);
         try testing.expectEqualStrings("Char", r.identifier);
-        // std.debug.print("{}\n", .{r.expression.body.group.items[1]});
         try testing.expectEqual(Expression.Body.Tag.select, r.expression.body);
         try testing.expectEqual(@as(usize, 2), r.expression.body.select.items.len);
         const sel1 = r.expression.body.select.items[0];

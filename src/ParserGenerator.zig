@@ -846,6 +846,7 @@ pub inline fn Search(pattern: Pattern) Pattern {
     return .{ .search = &tmp };
 }
 
+pub const Ignore = NoCapture;
 pub inline fn NoCapture(pattern: Pattern) Pattern {
     var tmp = pattern;
     return .{ .no_cap = &tmp };
