@@ -21,11 +21,73 @@ pub fn Input(comptime R: type) type {
         furthest: usize,
 
         pub const Self = @This();
-        pub fn refill(i: *Self, pos: usize) !void {
-            i.base = pos;
+
+        pub fn refill(i: *Self, pos_: usize) !void {
+            i.base = pos_;
             i.coff = 0;
             try i.r.seekTo(i.base);
-            i.nchunk = try i.r.context.read(&i.chunk);
+            i.nchunk = try i.r.context.read(i.chunk[0..]);
+            // std.debug.print("input.refill() i.nchunk={}, i.base={}, i.coff={}, i.furthest={}\n", .{ i.nchunk, i.base, i.coff, i.furthest });
+        }
+
+        pub fn pos(i: Self) usize {
+            return i.base + i.coff;
+        }
+
+        /// returns the next byte in the stream or 'false' if there are no more
+        /// bytes. Successive calls to Peek will return the same value unless there is a
+        /// call to SeekTo or Advance in between.
+        pub fn peek(i: *Self) ?u8 {
+            const pos_ = i.base + i.coff;
+            if (pos_ > i.furthest) i.furthest = pos_;
+            return if (i.nchunk != 0) i.chunk[i.coff] else null;
+        }
+
+        /// moves the current read position to the desired read position. Returns
+        /// true if the seek went to a valid location within the reader, and false
+        /// otherwise. In other words, if seek returns true the next call to Peek will
+        /// return a valid byte.
+        pub fn seekTo(i: *Self, pos_: usize) !bool {
+            // check if the seek position in within the current chunk and if so just
+            // update the internal offset.
+            const chunk_end = i.base + i.nchunk;
+            if (pos_ < chunk_end and pos_ >= i.base) {
+                i.coff = pos_ - i.base;
+                return true;
+            }
+
+            // refill the cache (moves the base)
+            try i.refill(pos_);
+            return i.nchunk != 0;
+        }
+
+        /// moves the offset forward by 'n' bytes. Returns true if the advance
+        /// was successful (n chars were successfully skipped) and false otherwise. Note
+        /// that even if Advance returns true the next call to Peek may return false if
+        /// the advance went to the exact end of the data.
+        pub fn advance(i: *Self, n: usize) !bool {
+            if (i.nchunk == 0) return false;
+
+            i.coff += n;
+            if (i.coff > i.nchunk) {
+                try i.refill(i.base + i.coff);
+                return false;
+            } else if (i.coff == i.nchunk) {
+                try i.refill(i.base + i.coff);
+            }
+            return true;
+        }
+
+        pub fn readAt(i: *Self, buf: []u8, pos_: usize) !usize {
+            try i.r.seekTo(pos_);
+            return i.r.context.read(buf);
+        }
+
+        /// returns a slice of the reader corresponding to the range [low:high).
+        pub fn slice(i: *Self, low: usize, high: usize, buf: []u8) ![]const u8 {
+            if (buf.len < high - low) return error.OutOfMemory;
+            const n = try i.readAt(buf[0 .. high - low], low);
+            return buf[0..n];
         }
     };
 }
