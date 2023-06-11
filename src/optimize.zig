@@ -1,93 +1,144 @@
+const std = @import("std");
+const mem = std.mem;
 const Pg = @import("ParserGenerator.zig");
 const Ptr = Pg.Pattern.Ptr;
 const isa = @import("isa.zig");
 
-// pub fn inline(p: Pattern, allocator: mem.Allocator) !Program {
-// }
-
-pub fn getSlice(p: []const Pg.Pattern) []const Pg.Pattern {
-    _ = p;
-    // TODO
-    unreachable;
-}
 pub fn get(p: Ptr) Ptr {
     switch (p.*) {
         .non_term => |n| {
             if (n.inlined) |x| return x;
         },
-        .alt_slice => |n| {
-            _ = n;
-            // TODO remove empties
-        },
-        .seq_slice => |*nptr| {
-            var i: usize = 0;
-            var n = nptr.*;
-            while (i < n.len) {
-                if (n[i] == .empty) {
-                    @memcpy(n[i .. n.len - 1], n[i + 1 ..]);
-                    n.len -= 1;
-                } else i += 1;
+        .alt_slice, .seq_slice => unreachable,
+        .alt => |t| {
+            const l = t.left.get();
+            const r = t.right.get();
+            if (l.* == .empty) return l;
+
+            if (r.* == .empty) {
+                r.* = .{ .optional = l };
+                return r.get();
             }
-            nptr.* = n;
+
+            // Combine the left and right sides of an alternation into a class node
+            // if possible.
+            if (combine(l, r)) |set| {
+                l.* = .{ .class = set };
+                return l;
+            }
         },
-        .optional => |n| {
-            _ = n;
-            // TODO remove empties
+        .optional => |t| {
+            // Optional of a Kleene star is unnecessary and we can remove the
+            // optional.
+            if (t.* == .star) return t.star;
+        },
+        .seq => |t| {
+            // optimize use of empty: `a ""` and `"" a` are just `a`.
+            const l = t.left.get();
+            const r = t.right.get();
+            if (r.* == .empty) return l;
+            if (l.* == .empty) return r;
+
+            // This optimizes patterns like `![a-z] .`. Instead of using a not
+            // predicate in this case, we can just complement the set and use a
+            // class node.
+            const nn = if (l.* == .negative)
+                l.negative
+            else
+                return p;
+
+            var set: Pg.Charset = undefined;
+            switch (nn.get().*) {
+                .literal => |str| {
+                    if (str.len != 1) return p;
+                    set = Pg.Charset.initEmpty();
+                    set.set(str[0]);
+                },
+                .class => |lt| set = lt,
+                else => return p,
+            }
+
+            switch (r.*) {
+                .dot => |rt| if (rt == 1) {
+                    r.* = .{ .class = set.complement() };
+                    return r;
+                },
+                .class => |rt| {
+                    r.* = .{ .class = rt.differenceWith(set) };
+
+                    return r;
+                },
+                .literal => |str| if (str.len == 1) {
+                    var res = Pg.Charset.initEmpty();
+                    res.set(str[0]);
+                    r.* = .{ .class = res.differenceWith(set) };
+                    return r;
+                },
+                else => {},
+            }
         },
         else => {},
     }
     return p;
 }
 
-pub fn combine(p1: *Pg.Pattern, p2: *Pg.Pattern) ?Pg.Charset {
+pub fn combine(p1: Ptr, p2: Ptr) ?Pg.Charset {
     switch (p1.*) {
         .literal => |str| {
-            if (str.len != 3) return null;
+            std.log.debug("combine lit", .{});
+            if (str.len != 1) return null;
             switch (p2.*) {
                 .class => |n| {
+                    std.log.debug("combine lit 1", .{});
                     var s = n;
-                    s.set(str[1]);
+                    s.set(str[0]);
                     return s;
                 },
                 .literal => |str2| {
-                    if (str2.len != 3) return null;
+                    std.log.debug("combine lit 2", .{});
+                    if (str2.len != 1) return null;
                     var s = Pg.Charset.initEmpty();
-                    s.set(str[1]);
-                    s.set(str2[1]);
+                    s.set(str[0]);
+                    s.set(str2[0]);
                     return s;
                 },
 
                 else => {},
             }
         },
-        .class => |n| switch (p2.*) {
-            .class => |n2| {
-                var s = n;
-                s.setUnion(n2);
-                return s;
-            },
-            .literal => |str| {
-                if (str.len != 3) return null;
-                var s = n;
-                s.set(str[1]);
-                return s;
-            },
+        .class => |n| {
+            std.log.debug("combine class", .{});
+            switch (p2.*) {
+                .class => |n2| {
+                    std.log.debug("combine class 1", .{});
+                    var s = n;
+                    s.setUnion(n2);
+                    return s;
+                },
+                .literal => |str| {
+                    std.log.debug("combine class 2", .{});
+                    if (str.len != 1) return null;
+                    var s = n;
+                    s.set(str[0]);
+                    return s;
+                },
 
-            else => {},
+                else => {},
+            }
         },
         else => {},
     }
+    std.log.debug("combine lit null", .{});
     return null;
 }
 
 // Returns the next instruction in p, skipping labels and nops.
 // If false is returned, there is no next instruction.
 pub fn nextInsn(p: []const isa.Insn) ?isa.Insn {
-    for (0..p.len) |i| {
-        const insn = if (p[i] == .insn) p[i].insn else p[i].open_call.insn;
+    for (p) |insn| {
         switch (insn) {
             .label, .nop => {},
-            else => return p[i],
+            else => return insn,
         }
     }
 
@@ -96,16 +147,83 @@ pub fn nextInsn(p: []const isa.Insn) ?isa.Insn {
 
 // Returns the index of the next instruction and if there was a label before
 // it.
-pub fn nextInsnLabel(p: []const isa.Insn) ?usize {
+pub fn nextInsnLabel(p: []const isa.Insn) struct { usize, bool } {
     var hadLabel = false;
     for (0..p.len) |i| {
-        const insn = if (p[i] == .insn) p[i].insn else p[i].open_call.insn;
+        const insn = p[i];
         switch (insn) {
             .nop => {},
             .label => hadLabel = true,
-            else => return i,
+            else => return .{ i, hadLabel },
         }
     }
 
-    return null;
+    return .{ std.math.maxInt(usize), hadLabel };
+}
+
+// Optimize performs some optimization passes on the code in p. In particular
+// it performs head-fail optimization and jump replacement.
+pub fn optimize(allocator: mem.Allocator, p: *isa.Program) !void {
+    // map from label to index in code
+    var labels = std.AutoHashMap(isa.Label, usize).init(allocator);
+    defer labels.deinit();
+    for (p.items, 0..) |insn, i| {
+        switch (insn) {
+            .label => |n| try labels.put(n, i),
+            else => {},
+        }
+    }
+    std.log.debug("optimize p.items.len={}", .{p.items.len});
+    for (p.items[0 .. p.items.len - 1], 0..) |insn, i| {
+        // head-fail optimization: if we find a choice instruction immediately
+        // followed (no label) by Char/Set/Any, we can replace with the
+        // dedicated instruction TestChar/TestSet/TestAny.
+        std.log.debug("optimize() insn={}", .{insn});
+        if (insn != .choice) continue;
+        const ch = insn.choice;
+        switch (p.items[i + 1]) {
+            .char => |t| {
+                p.items[i] = isa.Insn.init(.test_char, .{
+                    .byte = t,
+                    .lbl = ch,
+                });
+                p.items[i + 1] = isa.Insn.init(.nop, {});
+            },
+            .set => |t| {
+                p.items[i] = isa.Insn.init(.test_set, .{
+                    .chars = t,
+                    .lbl = ch,
+                });
+                p.items[i + 1] = isa.Insn.init(.nop, {});
+            },
+            .any => |t| {
+                p.items[i] = isa.Insn.init(.test_any, .{
+                    .n = t,
+                    .lbl = ch,
+                });
+                p.items[i + 1] = isa.Insn.init(.nop, {});
+            },
+            else => {},
+        }
+
+        // jump optimization: if we find a jump to another control flow
+        // instruction, we can replace the current jump directly with the
+        // target instruction.{
+        if (insn == .jump) {
+            if (nextInsn(p.items[labels.get(insn.jump).?..])) |next_insn| {
+                switch (next_insn) {
+                    .partial_commit,
+                    .back_commit,
+                    .commit,
+                    .jump,
+                    .ret,
+                    .fail,
+                    .fail_twice,
+                    .end,
+                    => p.items[i] = next_insn,
+                    else => {},
+                }
+            }
+        }
+    }
 }
