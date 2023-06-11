@@ -1,13 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const ParserGenerator = @import("ParserGenerator.zig");
-
-/// openCall is a dummy instruction for resolving recursive function calls in
-/// grammars.
-const openCall = struct {
-    name: []const u8,
-    insn: Insn_,
-};
+const input = @import("input.zig");
 
 pub const Program = std.ArrayListUnmanaged(Insn);
 
@@ -24,34 +18,9 @@ pub fn programFromSlice(allocator: mem.Allocator, is: []const Insn) !Program {
 }
 
 pub const Insn = union(enum) {
-    insn: Insn_,
-    open_call: openCall,
-
-    pub fn init(comptime tag: Insn_.Tag, payload: anytype) Insn {
-        return .{ .insn = Insn_.init(tag, payload) };
-    }
-    pub fn initOpenCall(name: []const u8, comptime tag: Insn_.Tag, payload: anytype) Insn {
-        return .{ .open_call = .{ .name = name, .insn = Insn_.init(tag, payload) } };
-    }
-
-    pub fn format(i: Insn, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = options;
-        _ = fmt;
-        switch (i) {
-            .open_call => |n| try writer.print("open_call {s}", .{n.name}),
-            .insn => |ii| try writer.print("{}", .{ii}),
-        }
-    }
-
-    pub fn inner(insn: Insn) Insn_ {
-        return switch (insn) {
-            .insn => |i| i,
-            .open_call => |i| i.insn,
-        };
-    }
-};
-
-pub const Insn_ = union(enum) {
+    /// openCall is a dummy instruction for resolving recursive function calls in
+    /// grammars.
+    open_call: []const u8,
     /// Label is used for marking a location in the instruction code with
     /// a unique ID
     label: Label,
@@ -60,8 +29,6 @@ pub const Insn_ = union(enum) {
     char: u8,
     /// Jump jumps to Lbl.
     jump: Label,
-    // A JumpType instruction is any instruction that refers to a Label.
-    jump_type,
     /// Choice pushes Lbl to the stack and if there is a failure the label will
     /// be popped from the stack and jumped to.
     choice: Label,
@@ -149,31 +116,46 @@ pub const Insn_ = union(enum) {
     check_begin: CheckBegin,
     /// CheckEnd records the end position of a checker and applies the checker to
     /// determine if the match should fail.
-    check_end: CheckEnd,
+    check_end: Checker,
     /// Error logs an error message at the current position.
     err: []const u8,
+    /// A NotFoundError means a a non-terminal was not found during grammar
+    /// compilation.
+    not_found_error: []const u8,
 
-    pub const Tag = std.meta.Tag(Insn_);
-    pub fn init(comptime tag: Tag, payload: anytype) Insn_ {
-        return @unionInit(Insn_, @tagName(tag), payload);
+    pub const Tag = std.meta.Tag(Insn);
+    pub fn init(comptime tag: Tag, payload: anytype) Insn {
+        return @unionInit(Insn, @tagName(tag), payload);
     }
 
-    pub fn format(i: Insn_, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(i: Insn, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = options;
         _ = fmt;
         if (i != .label) {
             _ = try writer.write(@tagName(i));
         }
         switch (i) {
-            .set => |n| {
-                var iter = n.iterator(.{});
-                _ = try writer.write("=");
-                while (iter.next()) |item|
-                    try writer.print("{c}", .{@intCast(u8, item)});
-            },
-            .label => |n| try writer.print("{}:", .{n.id}),
-            .jump => |j| try writer.print(" {}", .{j.id}),
+            .set => |n| try writer.print("{}", .{ParserGenerator.CharsetFmt.init(n)}),
+            .label => |n| try writer.print("l{}:", .{n.id}),
+            .jump => |j| try writer.print(" l{}", .{j.id}),
+            .choice => |n| try writer.print(" l{}", .{n.id}),
+            .char => |n| try writer.print(" '{c}'", .{n}),
+
             else => {},
+        }
+    }
+
+    /// returns true if insn has a label
+    pub fn isJumpType(insn: Insn) bool {
+        switch (insn) {
+            inline else => |_, tag| {
+                const T = std.meta.FieldType(Insn, tag);
+                return comptime mem.indexOfScalar(
+                    type,
+                    &.{ Label, LabelId, ByteLabel, CharsLabel, TestAny },
+                    T,
+                ) != null;
+            },
         }
     }
 };
@@ -228,8 +210,73 @@ pub const CheckBegin = struct {
     flag: usize,
 };
 
-pub const Checker = struct {};
+pub const CheckerFnT = fn (
+    checker: ?*anyopaque,
+    b: []const u8,
+    src: ?*anyopaque,
+    id: u32,
+    flag: u32,
+) isize;
 
-pub const CheckEnd = struct {
-    checker: Checker,
+pub const CheckerFn = *const CheckerFnT;
+
+pub const Checker = struct {
+    ptr: ?*anyopaque,
+    func: CheckerFn,
+};
+
+pub const Ref = enum(u8) {
+    def,
+    use,
+    block,
+
+    pub fn code(r: Ref) u8 {
+        return @enumToInt(r);
+    }
+};
+
+pub const BackReference = struct {
+    symbols: std.AutoHashMapUnmanaged(usize, []const u8) = .{},
+    buf: [0x100]u8 = undefined,
+    allocator: mem.Allocator,
+
+    pub fn deinit(br: *BackReference) void {
+        var iter = br.symbols.iterator();
+        while (iter.next()) |e|
+            br.allocator.free(e.value_ptr.*);
+        br.symbols.deinit(br.allocator);
+    }
+
+    pub const Stream = std.io.FixedBufferStream([]u8).SeekableStream;
+    pub const Input = input.Input(Stream);
+    pub fn check(self: ?*anyopaque, b: []const u8, src_: ?*anyopaque, id: u32, flag: u32) isize {
+        const r = @ptrCast(*BackReference, @alignCast(@alignOf(*BackReference), self));
+        const src = @ptrCast(*Input, @alignCast(@alignOf(*Input), src_));
+        switch (@intToEnum(Ref, @intCast(u8, flag))) {
+            .def => {
+                // std.log.debug("BackReference.check() Def b={s}", .{b});
+                const duped = r.allocator.dupe(u8, b) catch |e|
+                    std.debug.panic("BackReference.check() error: {}", .{e});
+                const gop = r.symbols.getOrPut(r.allocator, id) catch |e|
+                    std.debug.panic("BackReference.check() error: {}", .{e});
+                if (gop.found_existing) r.allocator.free(gop.value_ptr.*);
+                gop.value_ptr.* = duped;
+                return 0;
+            },
+            .use => {
+                const back = r.symbols.get(id) orelse
+                    std.debug.panic("BackReference.check() internal error: id={} not found", .{id});
+
+                const n = src.readAt(r.buf[0..back.len], src.pos()) catch |e|
+                    std.debug.panic("BackReference.check() error in src.readAt(): {}", .{e});
+                // std.log.debug("BackReference.check() Use n={} read='{s}', back='{s}'", .{ n, r.buf[0..n], back });
+                if (std.mem.eql(u8, r.buf[0..n], back)) {
+                    return @bitCast(isize, n);
+                }
+                return -1;
+            },
+            .block => {},
+        }
+        return 0;
+    }
 };
