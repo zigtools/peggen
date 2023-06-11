@@ -133,7 +133,7 @@ pub const Pattern = union(enum) {
     /// map from rule name to Pattern
     pub const RuleMap = std.StringHashMapUnmanaged(Pattern);
     pub const Lr = struct { left: Ptr, right: Ptr };
-    pub const PattId = struct { patt: Ptr, id: i32 };
+    pub const PattId = struct { patt: Ptr, id: usize };
 
     pub fn match(pat: Self, stream: *Stream, ctx: *Context) !void {
         switch (pat) {
@@ -729,6 +729,19 @@ pub fn Set(set: Charset) Pattern {
 
 pub fn NonTerm(name: []const u8) Pattern {
     return .{ .non_term = .{ .name = name } };
+}
+
+pub var memo_id: usize = 0;
+
+pub inline fn Memo(pattern: Pattern) Pattern {
+    var tmp = pattern;
+    defer memo_id += 1;
+    return .{ .memo = .{ .patt = &tmp, .id = memo_id } };
+}
+
+pub inline fn Cap(pattern: Pattern, id: usize) Pattern {
+    var tmp = pattern;
+    return .{ .cap = .{ .patt = &tmp, .id = id } };
 }
 
 pub fn initCharset(chars: []const u8) Charset {

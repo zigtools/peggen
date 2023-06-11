@@ -1,10 +1,10 @@
 const std = @import("std");
-const pattern = @import("pattern.zig");
+const pattern = @import("../pattern.zig");
 const Pattern = pattern.Pattern;
-const Vm = @import("Vm.zig");
-const memo = @import("memo.zig");
-const isa = @import("isa.zig");
-const input = @import("input.zig");
+const Vm = @import("../Vm.zig");
+const memo = @import("../memo.zig");
+const isa = @import("../isa.zig");
+const input = @import("../input.zig");
 
 const PatternTest = struct { []const u8, isize };
 
@@ -24,7 +24,8 @@ fn check(p_: Pattern, tests: []const PatternTest) !void {
         std.log.debug("=== RUN #{}: '{s}{s}'", .{ i, name, if (tt[0].len > 10) "..." else "" });
         var fbs = std.io.fixedBufferStream(tt[0]);
         var tbl = memo.Table{ .none = {} };
-        const res = try code.exec(fbs.seekableStream(), &tbl);
+        // use an undefined captures arena as no captures are created
+        const res = try code.exec(fbs.seekableStream(), &tbl, undefined);
         const match = res[0];
         const off = res[1];
         if (tt[1] == -1 and match or

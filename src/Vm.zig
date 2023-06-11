@@ -77,6 +77,11 @@ pub const StackEntry = struct {
         check,
     };
 
+    pub fn deinit(se: *StackEntry, allocator: mem.Allocator) void {
+        for (se.capt.items) |*capt| capt.deinit(allocator);
+        se.capt.deinit(allocator);
+    }
+
     pub fn addCapt(se: *StackEntry, allocator: mem.Allocator, capt: []const memo.Capture) !void {
         try se.capt.appendSlice(allocator, capt);
     }
@@ -85,17 +90,18 @@ pub const StackEntry = struct {
 pub const Stack = struct {
     entries: std.ArrayListUnmanaged(StackEntry) = .{},
     capt: std.ArrayListUnmanaged(memo.Capture) = .{},
+    capt_arena: mem.Allocator,
 
     pub fn deinit(s: *Stack, allocator: mem.Allocator) void {
+        for (s.entries.items) |*se| se.deinit(allocator);
         s.entries.deinit(allocator);
-        s.capt.deinit(allocator);
     }
 
-    pub fn addCapt(s: *Stack, allocator: mem.Allocator, capt: []const memo.Capture) !void {
+    pub fn addCapt(s: *Stack, capt: []const memo.Capture) !void {
         if (s.entries.items.len == 0) {
-            try s.capt.appendSlice(allocator, capt);
+            try s.capt.appendSlice(s.capt_arena, capt);
         } else {
-            try s.entries.items[(s.entries.items.len) - 1].addCapt(allocator, capt);
+            try s.entries.items[(s.entries.items.len) - 1].addCapt(s.capt_arena, capt);
         }
     }
 
@@ -119,7 +125,6 @@ pub const Stack = struct {
         // need to complete remake the slice so that the underlying captures can be
         // released to the garbage collector if the user has no references to them
         // (unused stack entries shouldn't keep references to those captures).
-        // s.entries = make([]stackEntry, 0, 4)
         s.entries.clearRetainingCapacity();
     }
 
@@ -127,8 +132,12 @@ pub const Stack = struct {
         try s.entries.append(allocator, ent);
     }
 
+    pub fn drop(s: *Stack, propagate: bool) !void {
+        if (try s.pop(propagate)) |ent|
+            ent.deinit(s.capt_arena);
+    }
     // propagate marks whether captures should be propagated up the stack.
-    pub fn pop(s: *Stack, allocator: mem.Allocator, propagate: bool) !?*StackEntry {
+    pub fn pop(s: *Stack, propagate: bool) !?*StackEntry {
         if (s.entries.items.len == 0)
             return null;
 
@@ -139,7 +148,7 @@ pub const Stack = struct {
         // For capture entries, we create a new node with the corresponding
         // children, and this is manually handled by the caller.
         if (propagate)
-            try s.addCapt(allocator, ret.capt.items);
+            try s.addCapt(ret.capt.items);
 
         return ret;
     }
@@ -181,6 +190,7 @@ pub const Stack = struct {
         try s.push(allocator, .{
             .type = .memo_tree,
             .memo = m,
+            .btrack = undefined,
         });
     }
 
@@ -188,6 +198,7 @@ pub const Stack = struct {
         try s.push(allocator, .{
             .type = .capt,
             .memo = m,
+            .btrack = undefined,
         });
     }
 
@@ -548,9 +559,20 @@ fn addChecker(code: *Vm, allocator: mem.Allocator, checker: isa.Checker) !usize 
 /// Exec executes the parsing program this virtual machine was created with. It
 /// returns whether the parse was a match, the last position in the subject
 /// string that was matched, and any captures that were created.
-pub fn exec(vm: *Vm, seekable_stream: anytype, memtbl: *memo.Table) !ExecResult {
-    var st = Stack{};
+/// 'captures_arena' is used only for captures
+pub fn exec(
+    vm: *Vm,
+    seekable_stream: anytype,
+    memtbl: *memo.Table,
+    captures_arena: mem.Allocator,
+) !ExecResult {
+    // TODO improve memory strategy. i wasn't able to to prevent leaks
+    // when captures were allocated with vm.allocator.  i added Stack.drop()
+    // which fixed some leaks.  if we want to fix more, perhaps instances of
+    // of Stack.pop() need to also be audited and the result deinit().
+    var st = Stack{ .capt_arena = captures_arena };
     defer st.deinit(vm.allocator);
+
     var src = try input.input(seekable_stream);
 
     return vm.execImpl(0, &st, &src, memtbl, null);
@@ -685,12 +707,12 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
             },
             .commit => {
                 const lbl = decodeU24(idata.items[ip + 1 ..]);
-                _ = try st.pop(vm.allocator, true);
+                try st.drop(true);
                 ip = lbl;
             },
             .ret => {
                 blk: {
-                    if (try st.pop(vm.allocator, true)) |ent| {
+                    if (try st.pop(true)) |ent| {
                         if (ent.type == .ret) {
                             ip = ent.ret;
                             break :blk;
@@ -706,7 +728,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 const set = decodeSet(idata.items[ip + 1 ..], vm.sets.items);
                 blk: {
                     if (src.peek()) |in| {
-                        std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), pattern.CharsetFmt.init(set) });
+                        // std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), pattern.CharsetFmt.init(set) });
                         if (set.isSet(in)) {
                             _ = try src.advance(1);
                             ip += sz(.set);
@@ -750,18 +772,19 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 ip += sz(.span);
             },
             .back_commit => {
+                const err_msg = "BackCommit failed";
                 const lbl = decodeU24(idata.items[ip + 1 ..]);
-                const ent = try st.pop(vm.allocator, true) orelse
-                    @panic("BackCommit failed");
+                const ent = try st.pop(true) orelse
+                    @panic(err_msg);
                 if (ent.type == .btrack) {
                     std.debug.assert(try src.seekTo(ent.btrack.off));
                     ip = lbl;
                 } else {
-                    @panic("BackCommit failed");
+                    @panic(err_msg);
                 }
             },
             .fail_twice => {
-                _ = try st.pop(vm.allocator, false);
+                try st.drop(false);
                 fail = true;
             },
             .test_char => {
@@ -819,10 +842,11 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 ip += sz(.check_begin);
             },
             .check_end => {
-                const ent = try st.pop(vm.allocator, true) orelse
-                    @panic("check end needs check stack entry");
+                const err_msg = "check end needs check stack entry";
+                const ent = try st.pop(true) orelse
+                    @panic(err_msg);
                 if (ent.type != .check)
-                    @panic("check end needs check stack entry");
+                    @panic(err_msg);
                 const checkid = decodeU24(idata.items[ip + 1 ..]);
                 const checker = vm.checkers.items[checkid];
 
@@ -839,13 +863,162 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
 
                 ip += sz(.check_end);
             },
-            else => std.debug.panic("Invalid opcode {}", .{op}),
+            .memo_tree_open => {
+                const lbl = decodeU24(idata.items[ip + 1 ..]);
+                const id = decodeU16(idata.items[ip + 4 ..]);
+
+                if (memtbl.get(id, src.pos())) |ment| {
+                    if (ment.length == -1)
+                        fail = true;
+
+                    try st.pushMemoTree(vm.allocator, .{
+                        .id = id,
+                        .pos = src.pos(),
+                        .count = ment.count,
+                    });
+
+                    try st.addCapt(ment.captures.items);
+                    _ = try src.advance(@intCast(usize, ment.length));
+                    _ = src.peek();
+                    ip = lbl;
+                } else {
+                    try st.pushMemoTree(vm.allocator, .{
+                        .id = id,
+                        .pos = src.pos(),
+                    });
+                    ip += sz(.memo_tree_open);
+                }
+            },
+            .capture_late => {
+                const back = decodeU8(idata.items[ip + 1 ..]);
+                const id = decodeU16(idata.items[ip + 2 ..]);
+                try st.pushCapt(vm.allocator, .{
+                    .id = id,
+                    .pos = src.pos() - back,
+                });
+                ip += sz(.capture_late);
+            },
+            .capture_full => {
+                const back = decodeU8(idata.items[ip + 1 ..]);
+                const id = decodeU16(idata.items[ip + 2 ..]);
+                const pos = src.pos();
+
+                if (overlaps(intrvl, pos - back, pos)) {
+                    const tmp = if (caprange) |c| c else Interval{ .low = 0, .high = 0 };
+                    caprange = .{
+                        .low = @min(tmp.low, pos - back),
+                        .high = @max(tmp.high, pos),
+                    };
+                    const capt = memo.Capture.initNode(id, pos - back, back, .{});
+                    try st.addCapt(&.{capt});
+                }
+
+                ip += sz(.capture_full);
+            },
+            .capture_end => {
+                const err_msg = "CaptureEnd did not find capture entry";
+                const ent = try st.pop(false) orelse
+                    @panic(err_msg);
+
+                if (ent.type != .capt)
+                    @panic(err_msg);
+
+                const end = src.pos();
+                if (overlaps(intrvl, ent.memo.pos, end)) {
+                    const tmp = if (caprange) |c| c else Interval{ .low = 0, .high = 0 };
+                    caprange = .{
+                        .low = @min(tmp.low, ent.memo.pos),
+                        .high = @max(tmp.high, end),
+                    };
+                    const capt = memo.Capture.initNode(ent.memo.id, ent.memo.pos, end - ent.memo.pos, ent.capt);
+                    try st.addCapt(&.{capt});
+                }
+                ip += sz(.capture_end);
+            },
+            .memo_tree_insert => {
+                const err_msg = "no memo entry on stack";
+                const ent = st.peek() orelse
+                    @panic(err_msg);
+                if (ent.type != .memo_tree)
+                    @panic(err_msg);
+                const mlen = src.pos() - ent.memo.pos;
+                ent.memo.count += 1;
+                try memoize(
+                    vm.allocator,
+                    ent.memo.id,
+                    ent.memo.pos,
+                    @intCast(isize, mlen),
+                    ent.memo.count,
+                    &ent.capt,
+                    src,
+                    memtbl,
+                    intrvl,
+                );
+                ip += sz(.memo_tree_insert);
+            },
+            .memo_tree => {
+                var seen: usize = 0;
+                var accum: usize = 0;
+                while (true) {
+                    const top = st.peekn(seen) orelse break;
+                    const next = st.peekn(seen + 1) orelse break;
+
+                    if (top.type != .memo_tree or next.type != .memo_tree)
+                        break;
+
+                    seen += 1;
+                    accum += top.memo.count;
+
+                    if (accum < next.memo.count) continue;
+
+                    for (1..seen) |_|
+                        try st.drop(true);
+                    if (try st.pop(false)) |ent| {
+                        // next is now top of stack
+                        if (ent.capt.items.len > 0) {
+                            if (intrvl == null) {
+                                const dummy = memo.Capture.initDummy(ent.memo.pos, src.pos() - ent.memo.pos, ent.capt);
+                                try st.addCapt(&.{dummy});
+                            } else {
+                                try st.addCapt(ent.capt.items);
+                            }
+                        }
+                    }
+
+                    next.memo.count = accum + next.memo.count;
+                    const mlen = src.pos() - next.memo.pos;
+                    try memoize(
+                        vm.allocator,
+                        next.memo.id,
+                        next.memo.pos,
+                        @intCast(isize, mlen),
+                        next.memo.count,
+                        &next.capt,
+                        src,
+                        memtbl,
+                        intrvl,
+                    );
+
+                    accum = 0;
+                    seen = 0;
+                }
+                ip += sz(.memo_tree);
+            },
+            .memo_tree_close => {
+                const id = decodeI16(idata.items[ip + 2 ..]);
+                while (st.peek()) |p| {
+                    if (p.type == .memo_tree and p.memo.id == id)
+                        try st.drop(true);
+                }
+                ip += sz(.memo_tree_close);
+            },
+            else => std.debug.panic("Invalid opcode .{s}", .{@tagName(BaseInsn.from(op))}),
         }
 
         if (fail) {
             while (true) {
                 std.log.debug("fail={} stack.len={}", .{ fail, st.entries.items.len });
-                const stack_entry = (try st.pop(vm.allocator, false)) orelse {
+                const stack_entry = (try st.pop(false)) orelse {
                     // match failed
                     return .{ false, src.pos(), null, errs };
                 };
@@ -905,4 +1078,9 @@ fn decodeU24(b: []const u8) u32 {
 fn decodeSet(b: []const u8, sets: []const pattern.Charset) pattern.Charset {
     const i = decodeU8(b);
     return sets[i];
+}
+
+fn overlaps(i_: ?Interval, low2: usize, high2: usize) bool {
+    const i = i_ orelse return true;
+    return i.low < high2 and i.high > low2;
 }

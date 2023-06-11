@@ -26,6 +26,11 @@ pub const Entry = struct {
     captures: Capture.List = .{},
     pos: usize,
 
+    pub fn deinit(e: *Entry, allocator: mem.Allocator) void {
+        for (e.captures.items) |*capt| capt.deinit(allocator);
+        e.captures.deinit(allocator);
+    }
+
     fn setPos(e: *Entry, allocator: mem.Allocator, pos: Pos) !void {
         e.pos = try pos.pos(allocator);
         for (e.captures.items) |*cap|
@@ -33,34 +38,37 @@ pub const Entry = struct {
     }
 };
 
-const tNode = 0;
-const tDummy = 1;
-
 pub const Capture = struct {
     id: u32,
-    typ: u32,
+    type: Type,
     off: usize,
     length: usize,
     ment: ?*Entry = null,
     children: List = .{},
 
     pub const List = std.ArrayListUnmanaged(Capture);
+    pub const Type = enum { node, dummy };
 
-    pub fn initNode(id: usize, start: usize, length: usize, children: List) Capture {
+    pub fn deinit(capt: *Capture, allocator: mem.Allocator) void {
+        if (capt.ment) |e| e.deinit(allocator);
+        for (capt.children.items) |*c| c.deinit(allocator);
+    }
+
+    pub fn initNode(id: usize, offset: usize, length: usize, children: List) Capture {
         return Capture{
             .id = @intCast(u32, id),
-            .typ = tNode,
-            .off = start,
+            .type = .node,
+            .off = offset,
             .length = length,
             .children = children,
         };
     }
 
-    pub fn initDummy(start: usize, length: usize, children: List) Capture {
+    pub fn initDummy(offset: usize, length: usize, children: List) Capture {
         return .{
             .id = 0,
-            .typ = tDummy,
-            .off = start,
+            .type = .dummy,
+            .off = offset,
             .length = length,
             .children = children,
         };
@@ -74,6 +82,67 @@ pub const Capture = struct {
 
         for (c.children.items) |*child|
             child.setMEnt(e);
+    }
+    pub const ChildIterator = struct {
+        capt: Capture,
+        buf: []ChildIterator,
+        depth: usize = 0,
+
+        /// returns only children which have type='node' entries, no
+        /// type='dummy' entries which seem to serve only as parent nodes
+        pub fn next(iter: *ChildIterator) !?Capture {
+            // std.debug.print("iter.next() iter depth={} capt={} children={any}\n", .{ iter.depth, iter.capt, iter.capt.children.items });
+            if (iter.capt.children.items.len == 0) {
+                if (iter.depth == 0)
+                    return null
+                else {
+                    iter.depth -= 1;
+                    iter.* = iter.buf[iter.depth];
+                    iter.capt.children.items = iter.capt.children.items[1..];
+                    return iter.next();
+                }
+            }
+
+            const ch = iter.capt.children.items[0];
+            // std.debug.print("iter.next() ch=.{s}\n", .{@tagName(ch.type)});
+            if (ch.type == .node) {
+                iter.capt.children.items = iter.capt.children.items[1..];
+                return ch;
+            }
+
+            std.debug.assert(ch.type == .dummy);
+            if (iter.depth >= iter.buf.len) return error.OutOfMemory;
+            // save self in puffer and descend into children
+            iter.buf[iter.depth] = iter.*;
+            const depth = iter.depth + 1;
+            iter.* = ch.childIterator(iter.buf);
+            iter.depth = depth;
+            return iter.next();
+        }
+    };
+
+    /// an iterator over a Capture and its children. 'buf.len' should be >=
+    /// to the maximum child depth.
+    pub fn childIterator(
+        capt: Capture,
+        buf: []ChildIterator,
+    ) ChildIterator {
+        return .{ .capt = capt, .buf = buf };
+    }
+
+    pub fn start(c: Capture) usize {
+        if (c.ment) |ent| {
+            return ent.pos + c.off;
+        }
+        return c.off;
+    }
+
+    pub fn format(c: Capture, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("type=.{s} id={}", .{ @tagName(c.type), c.id });
+        if (c.type == .node)
+            try writer.print(" range=[{},{}]", .{ c.start(), c.length });
     }
 };
 

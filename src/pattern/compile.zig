@@ -178,9 +178,32 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFoun
                 .class => |nn| {
                     return try isa.programFrom(allocator, Insn.init(.span, nn));
                 },
-                .memo => |nn| {
-                    _ = nn;
-                    unreachable;
+                .memo => |t| {
+                    // optimization: if the pattern we are repeating is a memoization
+                    // entry, we should use special instructions to memoize it as a tree to
+                    // get logarithmic saving when reparsing.
+                    var sub = try t.patt.get().compile(allocator);
+                    defer sub.deinit(allocator);
+                    var code = try Program.initCapacity(allocator, sub.items.len + 11);
+                    const l1 = isa.Label.init();
+                    const l2 = isa.Label.init();
+                    const l3 = isa.Label.init();
+                    const no_jump = isa.Label.init();
+                    pattern.memo_id += 1;
+
+                    code.appendAssumeCapacity(l1.toInsn());
+                    code.appendAssumeCapacity(Insn.init(.memo_tree_open, .{ .id = pattern.memo_id, .lbl = l3 }));
+                    code.appendAssumeCapacity(Insn.init(.choice, l2));
+                    code.appendSliceAssumeCapacity(sub.items);
+                    code.appendAssumeCapacity(Insn.init(.commit, no_jump));
+                    code.appendAssumeCapacity(no_jump.toInsn());
+                    code.appendAssumeCapacity(Insn.init(.memo_tree_insert, {}));
+                    code.appendAssumeCapacity(l3.toInsn());
+                    code.appendAssumeCapacity(Insn.init(.memo_tree, {}));
+                    code.appendAssumeCapacity(Insn.init(.jump, l1));
+                    code.appendAssumeCapacity(l2.toInsn());
+                    code.appendAssumeCapacity(Insn.init(.memo_tree_close, pattern.memo_id));
+                    return code;
                 },
                 else => {},
             }
@@ -189,11 +212,11 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFoun
             var code = try Program.initCapacity(allocator, sub.items.len + 4);
             var l1 = isa.Label.init();
             var l2 = isa.Label.init();
-            try code.append(allocator, Insn.init(.choice, l2));
-            try code.append(allocator, l1.toInsn());
-            try code.appendSlice(allocator, sub.items);
-            try code.append(allocator, Insn.init(.partial_commit, l1));
-            try code.append(allocator, l2.toInsn());
+            code.appendAssumeCapacity(Insn.init(.choice, l2));
+            code.appendAssumeCapacity(l1.toInsn());
+            code.appendSliceAssumeCapacity(sub.items);
+            code.appendAssumeCapacity(Insn.init(.partial_commit, l1));
+            code.appendAssumeCapacity(l2.toInsn());
             return code;
         },
         .plus => |n| {
@@ -270,8 +293,40 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFoun
         //     return code;
         // },
         .cap => |n| {
-            _ = n;
-            unreachable;
+            var sub = try n.patt.get().compile(allocator);
+            defer sub.deinit(allocator);
+            var code = try Program.initCapacity(allocator, sub.items.len + 2);
+
+            var i: usize = 0;
+            var back: u8 = 0;
+
+            for (sub.items) |insn| {
+                switch (insn) {
+                    .char, .set => {
+                        back += 1;
+                    },
+                    .any => |t| {
+                        back += t;
+                    },
+                    else => break,
+                }
+                i += 1;
+            }
+
+            if (i == 0 or back >= 256) {
+                try code.append(allocator, Insn.init(.capture_begin, n.id));
+                i = 0;
+            } else if (i == sub.items.len and back < 256) {
+                try code.appendSlice(allocator, sub.items);
+                try code.append(allocator, Insn.init(.capture_full, .{ .back = back, .id = n.id }));
+                return code;
+            } else {
+                try code.appendSlice(allocator, sub.items[0..i]);
+                try code.append(allocator, Insn.init(.capture_late, .{ .back = back, .id = n.id }));
+            }
+            try code.appendSlice(allocator, sub.items[i..]);
+            try code.append(allocator, Insn.init(.capture_end, undefined));
+            return code;
         },
         .no_cap => |n| {
             _ = n;
