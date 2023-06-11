@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const mem = std.mem;
 const Stream = @import("Stream.zig");
 const isa = @import("isa.zig");
@@ -44,49 +45,94 @@ inline fn matchString(expected: []const u8, actual: []const u8) bool {
 }
 
 pub const Charset = std.StaticBitSet(256);
-pub const Op = struct {};
+
+pub const CharsetFmt = struct {
+    set: Charset,
+
+    pub fn init(set: Charset) CharsetFmt {
+        return .{ .set = set };
+    }
+    pub fn format(setfmt: CharsetFmt, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+        _ = fmt;
+        var iter = setfmt.set.iterator(.{});
+        _ = try writer.write("[");
+        while (iter.next()) |item|
+            try writer.print("{c}", .{@intCast(u8, item)});
+        _ = try writer.write("]");
+    }
+};
 
 pub const Rule = struct { []const u8, Pattern };
 
 pub const Pattern = union(enum) {
+    /// represents an alt stored in a slice.
     alt_slice: Slice,
+    /// represents a seq stored in a slice.
     seq_slice: Slice,
+    /// the binary operator for alternation.
     alt: Lr,
+    /// the binary operator for sequences.
     seq: Lr,
+    /// the operator for the Kleene star.
     star: Ptr,
+    /// the operator for the Kleene plus.
     plus: Ptr,
+    /// the operator for making a pattern optional.
     optional: Ptr,
+    /// the '!' predicate.
     negative: Ptr,
+    /// the '&' predicate.
     positive: Ptr,
-    not: Ptr,
+    // not: Ptr,
+    /// marks a pattern to be captured with a certain ID.
     cap: PattId,
     no_cap: Ptr,
+    /// marks a pattern to be memoized with a certain ID.
     memo: PattId,
+    /// marks a pattern to be checked by a certain checker.
     check: struct {
         patt: Ptr,
-        // checker:  isa.Checker,
-        // id: u32,
-        // flag: u32,
+        checker: isa.Checker,
+        id: u32,
+        flag: u32,
     },
-    grammar: struct { defs: Grammar, start: []const u8 },
+    /// represents a grammar of non-terminals and their associated
+    /// patterns. The Grammar must also have an entry non-terminal.
+    grammar: struct { rules: RuleMap, start: []const u8 },
+    /// represents a search for a certain pattern.
     search: Ptr,
+    /// represents the repetition of a pattern a constant number of times.
     repeat: struct { patt: Ptr, n: usize },
+    /// a character set.
     class: Charset,
     char_fn: *const fn (u8) bool,
+    /// a literal string.
     literal: []const u8,
+    /// represents the use of a non-terminal. If this non-terminal is
+    /// inlined during compilation, the `inlined` field will point to the pattern
+    /// that is inlined.
     non_term: struct { name: []const u8, inlined: ?Ptr = null },
+    /// matches any byte a constant number of times.
     dot: u8,
+    /// a pattern that fails with a certain error message.
     err: struct { message: []const u8, recover: Ptr },
-    empty_op: Op,
+    /// a node that performs a zero-width assertion.
+    empty_op,
+    /// represents the empty pattern.
     empty,
     escape: struct { patt: Ptr, escapeFn: EscapeFn },
+    /// represents a node that hasn't been initialized. this is an
+    /// implementation detail chosen to avoid optional pointers.
+    null,
 
     const Self = @This();
     pub const Ptr = *Pattern;
     pub const Slice = []Pattern;
     pub const Tag = std.meta.Tag(Pattern);
-    pub const Grammar = std.StringHashMapUnmanaged(Pattern);
-    pub const Lr = struct { left: ?Ptr, right: ?Ptr };
+    /// map from rule name to Pattern
+    pub const RuleMap = std.StringHashMapUnmanaged(Pattern);
+    pub const Lr = struct { left: Ptr, right: Ptr };
     pub const PattId = struct { patt: Ptr, id: i32 };
 
     pub fn match(pat: Self, stream: *Stream, ctx: *Context) !void {
@@ -168,14 +214,14 @@ pub const Pattern = union(enum) {
                 positive.match(stream, ctx) catch
                     return error.ParseFailure;
             },
-            .not => |not| {
-                const state = stream.checkpoint();
-                errdefer stream.restore(state);
+            // .not => |not| {
+            //     const state = stream.checkpoint();
+            //     errdefer stream.restore(state);
 
-                if (not.match(stream, ctx)) |_|
-                    return error.ParseFailure
-                else |_| {}
-            },
+            //     if (not.match(stream, ctx)) |_|
+            //         return error.ParseFailure
+            //     else |_| {}
+            // },
             .optional => |opt| {
                 opt.match(stream, ctx) catch {};
             },
@@ -238,21 +284,94 @@ pub const Pattern = union(enum) {
         return optimize.get(p);
     }
 
-    pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound }!Program {
-        // std.debug.print("compile {s}\n", .{@tagName(p)});
+    var _null: Pattern = .null;
+    const null_ptr = &_null;
+
+    // Nodes with trees larger than this size will not be inlined.
+    const inline_threshold = 100;
+
+    fn inline_(allocator: mem.Allocator, p: Pattern) !bool {
+        assert(p == .grammar);
+        const g = p.grammar;
+        const Sizes = std.StringHashMap(usize);
+        var sizes = Sizes.init(allocator);
+        defer sizes.deinit();
+        const Leaves = std.StringHashMap(void);
+        var leaves = Leaves.init(allocator);
+        defer leaves.deinit();
+
+        var iter = g.rules.iterator();
+        while (iter.next()) |e| {
+            const n = e.key_ptr.*;
+            const sub = e.value_ptr;
+
+            var size: usize = 0;
+            var leaf = true;
+            const W = struct {
+                leaf: *bool,
+                size: *usize,
+                fn walk(w: *@This(), pat: Ptr) !void {
+                    // std.log.debug("walk {s} {} {}", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
+                    if (pat.* == .non_term and pat.non_term.inlined == null)
+                        w.leaf.* = false;
+                    w.size.* += 1;
+                }
+            };
+            var w = W{ .leaf = &leaf, .size = &size };
+            try walk(sub, true, *W, &w);
+            try sizes.put(n, size);
+            if (leaf)
+                try leaves.put(n, {});
+        }
+
+        var didInline = false;
+        const W = struct {
+            sizes: Sizes,
+            leaves: Leaves,
+            didInline: *bool,
+            rules: RuleMap,
+            fn walk(w: *@This(), pat: Ptr) !void {
+                if (pat.* == .non_term and pat.non_term.inlined == null) {
+                    // We only inline nodes if they are small enough and don't use
+                    // any non-terminals themselves.
+                    const name = pat.non_term.name;
+                    const sz = w.sizes.get(name) orelse return;
+                    if (sz < inline_threshold) {
+                        _ = w.leaves.get(name) orelse return;
+                        w.didInline.* = true;
+                        pat.non_term.inlined = w.rules.getPtr(name);
+                    }
+                }
+            }
+        };
+        var w = W{ .sizes = sizes, .leaves = leaves, .didInline = &didInline, .rules = g.rules };
+
+        var pmut = p;
+        try walk(&pmut, true, *W, &w);
+        return didInline;
+    }
+
+    pub fn compileAndOptimize(p: Pattern, allocator: mem.Allocator) !Program {
+        var c = try p.compile(allocator);
+        try optimize.optimize(allocator, &c);
+        return c;
+    }
+
+    pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound, InvalidLiteral }!Program {
+        std.log.debug("compile {s}", .{@tagName(p)});
         switch (p) {
             .grammar => |n| {
-                // try n.inline(allocator); // TODO
+                while (try inline_(allocator, p)) {}
                 const Used = std.StringHashMap(void);
                 var used = Used.init(allocator);
                 defer used.deinit();
-                var iter = n.defs.iterator();
+                var iter = n.rules.iterator();
                 while (iter.next()) |e| {
                     const v = e.value_ptr;
                     const W = struct {
                         used: *Used,
                         fn walk(w: @This(), pat: Ptr) !void {
-                            // std.debug.print("walk {s} {} {}\n", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
+                            // std.log.debug("walk {s} {} {}", .{ @tagName(pat.*), @enumToInt(pat.*), @enumToInt(Pattern.Tag.memo) });
                             if (pat.* == .non_term) {
                                 if (pat.non_term.inlined == null)
                                     try w.used.put(pat.non_term.name, {});
@@ -263,10 +382,15 @@ pub const Pattern = union(enum) {
                     try walk(v, true, W, w);
                 }
 
-                if (used.count() == 0) return n.defs.get(n.start).?.compile(allocator);
+                if (used.count() == 0)
+                    return n.rules.get(n.start).?.compile(allocator);
+
                 var code = Program{};
                 const lend = isa.Label.init();
-                try code.append(allocator, Insn.initOpenCall(n.start, .jump, lend));
+                try code.appendSlice(allocator, &.{
+                    Insn.init(.open_call, n.start),
+                    Insn.init(.jump, lend),
+                });
 
                 var labels = std.StringHashMap(isa.Label).init(allocator);
                 defer labels.deinit();
@@ -274,26 +398,25 @@ pub const Pattern = union(enum) {
                 while (iter.next()) |e| {
                     const k = e.key_ptr.*;
                     const v = e.value_ptr.*;
-                    // std.debug.print("grammar compile() key={s}\n", .{k});
+                    // std.log.debug("grammar compile() key={s}", .{k});
                     if (!mem.eql(u8, k, n.start) and !used.contains(k))
                         continue;
                     const label = isa.Label.init();
                     try labels.put(k, label);
                     var f = try v.compile(allocator);
+                    defer f.deinit(allocator);
                     try code.append(allocator, label.toInsn());
-                    try code.appendSlice(allocator, try f.toOwnedSlice(allocator));
+                    try code.appendSlice(allocator, f.items);
                     try code.append(allocator, isa.Insn.init(.ret, {}));
                 }
+
                 // resolve calls to openCall and do tail call optimization
                 for (0..code.items.len) |i| {
                     const insn = code.items[i];
                     if (insn == .open_call) {
-                        const oc = insn.open_call;
-                        const lbl = labels.get(oc.name) orelse
-                            {
-                            std.log.err("label '{s}' not found", .{oc.name});
-                            return error.NotFound;
-                        };
+                        const name = insn.open_call;
+                        const lbl = labels.get(name) orelse
+                            return isa.programFrom(allocator, Insn.init(.not_found_error, name));
 
                         // replace this placeholder instruction with a normal call
                         var replace = isa.Insn.init(.call, lbl);
@@ -301,11 +424,13 @@ pub const Pattern = union(enum) {
                         // a jump for tail call optimization.
                         if (optimize.nextInsn(code.items[i + 1 ..])) |next| {
                             switch (next) {
-                                Insn.init(.ret, {}) => {
+                                .ret => {
                                     replace = isa.Insn.init(.jump, lbl);
                                     // remove the return instruction if there is no label referring to it
-                                    if (optimize.nextInsnLabel(code.items[i + 1 ..])) |retidx| {
-                                        code.items[i + 1 + retidx] = isa.Insn.init(.nop, {});
+                                    const ret_hl = optimize.nextInsnLabel(code.items[i + 1 ..]);
+                                    const had_label = ret_hl[1];
+                                    if (!had_label) {
+                                        code.items[i + 1 + ret_hl[0]] = .nop;
                                     }
                                 },
                                 else => {},
@@ -323,47 +448,76 @@ pub const Pattern = union(enum) {
             },
             .alt_slice, .seq_slice => unreachable,
             .seq => |n| {
-                var l = if (n.left) |l| try l.get().compile(allocator) else Program{};
-                var r = if (n.right) |r| try r.get().compile(allocator) else Program{};
-                try l.appendSlice(allocator, try r.toOwnedSlice(allocator));
+                var l = try n.left.get().compile(allocator);
+                errdefer l.deinit(allocator);
+                var r = try n.right.get().compile(allocator);
+                defer r.deinit(allocator);
+                try l.appendSlice(allocator, r.items);
                 return l;
             },
             .non_term => |n| {
                 if (n.inlined) |sp| return sp.compile(allocator);
-                return isa.programFrom(allocator, Insn.initOpenCall(n.name, .nop, {}));
+                return isa.programFrom(allocator, Insn.init(.open_call, n.name));
             },
 
             .alt => |n| {
-
                 // optimization: if Left and Right are charsets/single chars, return the union
-                if (n.left != null and n.right != null) {
-                    if (optimize.combine(n.left.?.get(), n.right.?.get())) |set| {
+                if (n.left.* != .empty and n.right.* != .empty) {
+                    if (optimize.combine(n.left.get(), n.right.get())) |set| {
                         return isa.programFrom(allocator, Insn.init(.set, set));
                     }
                 }
 
-                var l = if (n.left) |l| try l.get().compile(allocator) else Program{};
-                var r = if (n.right) |r| try r.get().compile(allocator) else Program{};
+                var l = try n.left.get().compile(allocator);
+                defer l.deinit(allocator);
+                var r = try n.right.get().compile(allocator);
+                defer r.deinit(allocator);
 
                 const l1 = isa.Label.init();
-
-                // TODO disjoint
                 // optimization: if the right and left nodes are disjoint, we can use
                 // NoChoice variants of the head-fail optimization instructions.
+                var disjoint = false;
+                var testinsn: isa.Insn = undefined;
+                blk: {
+                    const linsn = optimize.nextInsn(l.items) orelse break :blk;
+                    const rinsn = optimize.nextInsn(r.items) orelse break :blk;
+
+                    switch (linsn) {
+                        .set => |lt| {
+                            switch (rinsn) {
+                                .char => |rt| disjoint = !lt.isSet(rt),
+                                else => {},
+                            }
+                            testinsn = .{ .test_set_no_choice = .{ .chars = lt, .lbl = l1 } };
+                        },
+                        .char => |lt| {
+                            switch (rinsn) {
+                                .char => |rt| disjoint = lt != rt,
+                                .set => |rt| disjoint = !rt.isSet(lt),
+                                else => {},
+                            }
+                            testinsn = .{ .test_char_no_choice = .{ .byte = lt, .lbl = l1 } };
+                        },
+                        else => {},
+                    }
+                }
 
                 const l2 = isa.Label.init();
+                // std.log.debug("compile(.alt) l1={} l2={}", .{ l1.id, l2.id });
                 var code = try Program.initCapacity(allocator, l.items.len + r.items.len + 5);
-                // TODO
-                // if (disjoint) {
-                // ...
-                // } else {
-                try code.append(allocator, Insn.init(.choice, l1));
-                try code.appendSlice(allocator, try l.toOwnedSlice(allocator));
-                try code.append(allocator, Insn.init(.commit, l2));
-                // }
-                try code.append(allocator, l1.toInsn());
-                try code.appendSlice(allocator, try r.toOwnedSlice(allocator));
-                try code.append(allocator, l2.toInsn());
+
+                if (disjoint) {
+                    code.appendAssumeCapacity(testinsn);
+                    code.appendSliceAssumeCapacity(l.items[1..]);
+                    code.appendAssumeCapacity(Insn.init(.jump, l2));
+                } else {
+                    code.appendAssumeCapacity(Insn.init(.choice, l1));
+                    code.appendSliceAssumeCapacity(l.items);
+                    code.appendAssumeCapacity(Insn.init(.commit, l2));
+                }
+                code.appendAssumeCapacity(l1.toInsn());
+                code.appendSliceAssumeCapacity(r.items);
+                code.appendAssumeCapacity(l2.toInsn());
                 return code;
             },
             .star => |n| {
@@ -378,12 +532,13 @@ pub const Pattern = union(enum) {
                     else => {},
                 }
                 var sub = try n.get().compile(allocator);
+                defer sub.deinit(allocator);
                 var code = try Program.initCapacity(allocator, sub.items.len + 4);
                 var l1 = isa.Label.init();
                 var l2 = isa.Label.init();
                 try code.append(allocator, Insn.init(.choice, l2));
                 try code.append(allocator, l1.toInsn());
-                try code.appendSlice(allocator, try sub.toOwnedSlice(allocator));
+                try code.appendSlice(allocator, sub.items);
                 try code.append(allocator, Insn.init(.partial_commit, l1));
                 try code.append(allocator, l2.toInsn());
                 return code;
@@ -391,21 +546,21 @@ pub const Pattern = union(enum) {
             .plus => |n| {
                 const starp = Pattern{ .star = n.get() };
                 var star = try starp.compile(allocator);
-                errdefer star.deinit(allocator);
+                defer star.deinit(allocator);
                 var sub = try n.get().compile(allocator);
-                errdefer sub.deinit(allocator);
+                defer sub.deinit(allocator);
 
                 var code = try Program.initCapacity(allocator, sub.items.len + star.items.len);
-                code.appendSliceAssumeCapacity(try sub.toOwnedSlice(allocator));
-                code.appendSliceAssumeCapacity(try star.toOwnedSlice(allocator));
+                code.appendSliceAssumeCapacity(sub.items);
+                code.appendSliceAssumeCapacity(star.items);
                 return code;
             },
             .optional => |n| {
                 switch (n.get().*) {
-                    .literal => |s| if (s.len == 3) {
+                    .literal => |s| if (s.len == 1) {
                         const l1 = isa.Label.init();
                         return isa.programFromSlice(allocator, &.{
-                            Insn.init(.test_char_no_choice, .{ .byte = s[1], .lbl = l1 }),
+                            Insn.init(.test_char_no_choice, .{ .byte = s[0], .lbl = l1 }),
                             l1.toInsn(),
                         });
                     },
@@ -420,28 +575,47 @@ pub const Pattern = union(enum) {
                 }
                 const a = Pattern{ .alt = .{
                     .left = n.get(),
-                    .right = null,
+                    .right = null_ptr,
                 } };
                 return a.compile(allocator);
             },
             .negative => |n| {
                 var sub = try n.get().compile(allocator);
+                defer sub.deinit(allocator);
                 const l1 = isa.Label.init();
                 var code = try isa.Program.initCapacity(allocator, sub.items.len + 3);
                 code.appendAssumeCapacity(Insn.init(.choice, l1));
-                code.appendSliceAssumeCapacity(try sub.toOwnedSlice(allocator));
+                code.appendSliceAssumeCapacity(sub.items);
                 code.appendAssumeCapacity(Insn.init(.fail_twice, {}));
                 code.appendAssumeCapacity(l1.toInsn());
                 return code;
             },
             .positive => |n| {
-                _ = n;
-                unreachable;
+                var sub = try n.get().compile(allocator);
+                var code = try isa.Program.initCapacity(allocator, sub.items.len + 5);
+                defer sub.deinit(allocator);
+                const l1 = isa.Label.init();
+                const l2 = isa.Label.init();
+                code.appendAssumeCapacity(Insn.init(.choice, l1));
+                code.appendSliceAssumeCapacity(sub.items);
+                code.appendAssumeCapacity(Insn.init(.back_commit, l2));
+                code.appendAssumeCapacity(Insn.init(.label, l1));
+                code.appendAssumeCapacity(Insn.init(.fail, {}));
+                code.appendAssumeCapacity(Insn.init(.label, l2));
+                return code;
             },
-            .not => |n| {
-                _ = n;
-                unreachable;
-            },
+            // .not => |n| {
+            //     if (true) unreachable;
+            //     var sub = try n.get().compile(allocator);
+            //     defer sub.deinit(allocator);
+            //     const l1 = isa.Label.init();
+            //     var code = try isa.Program.initCapacity(allocator, sub.items.len + 3);
+            //     code.appendAssumeCapacity(Insn.init(.choice, l1));
+            //     code.appendSliceAssumeCapacity(sub.items);
+            //     code.appendAssumeCapacity(Insn.init(.fail_twice, {}));
+            //     code.appendAssumeCapacity(l1.toInsn());
+            //     return code;
+            // },
             .cap => |n| {
                 _ = n;
                 unreachable;
@@ -455,12 +629,60 @@ pub const Pattern = union(enum) {
                 unreachable;
             },
             .check => |n| {
-                _ = n;
-                unreachable;
+                const L1 = isa.Label.init();
+                var sub = try n.patt.get().compile(allocator);
+                defer sub.deinit(allocator);
+                var code = try Program.initCapacity(allocator, sub.items.len + 3);
+                code.appendAssumeCapacity(Insn.init(.check_begin, .{
+                    .id = n.id,
+                    .flag = n.flag,
+                }));
+                code.appendSliceAssumeCapacity(sub.items);
+                code.appendAssumeCapacity(Insn.init(.check_end, n.checker));
+                code.appendAssumeCapacity(L1.toInsn());
+                return code;
             },
             .search => |n| {
-                _ = n;
-                unreachable;
+                var set: Charset = undefined;
+                var opt = false;
+
+                var sub = try n.get().compile(allocator);
+                defer sub.deinit(allocator);
+
+                if (optimize.nextInsn(sub.items)) |next| {
+                    switch (next) {
+                        .char => |t| {
+                            set = Charset.initEmpty();
+                            set.set(t);
+                            set = set.complement();
+                            opt = true;
+                        },
+                        .set => |t| {
+                            // Heuristic: if the set is smaller than 10 chars, it
+                            // is unlikely enough to match that we should consume all
+                            // chars from the complement before continuing the search.
+                            // The number 10 was arbitrarily chosen.
+                            if (t.count() < 10) {
+                                set = t.complement();
+                                opt = true;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                const rsearch = if (opt)
+                    GroupBuf(2, &.{ ZeroOrMore(Set(set)), NonTerm("S") })
+                else
+                    NonTerm("S");
+
+                const patt = SelectBuf(2, &.{
+                    n.get().*,
+                    GroupBuf(2, &.{ Any(1), rsearch }),
+                });
+                var g = try rulesToGrammar(allocator, &.{.{ "S", patt }}, "S");
+                defer g.deinit(allocator);
+                return g.compile(allocator);
             },
             .repeat => |n| {
                 _ = n;
@@ -474,8 +696,9 @@ pub const Pattern = union(enum) {
                 unreachable;
             },
             .literal => |n| {
-                var code = try Program.initCapacity(allocator, n.len - 2);
-                for (n[1 .. n.len - 1]) |c|
+                if (n.len == 0) return error.InvalidLiteral;
+                var code = try Program.initCapacity(allocator, n.len);
+                for (n) |c|
                     code.appendAssumeCapacity(Insn.init(.char, c));
                 return code;
             },
@@ -490,9 +713,8 @@ pub const Pattern = union(enum) {
                 _ = n;
                 unreachable;
             },
-            .empty => |n| {
-                _ = n;
-                unreachable;
+            .empty, .null => {
+                return Program{};
             },
             .escape => |n| {
                 _ = n;
@@ -510,15 +732,13 @@ pub const Pattern = union(enum) {
             .alt_slice => unreachable,
             .seq_slice => unreachable,
             .alt, .seq => |n| {
-                if (n.left) |l|
-                    try walk(l, followInline, Walker, walker);
-                if (n.right) |r|
-                    try walk(r, followInline, Walker, walker);
+                try walk(n.left, followInline, Walker, walker);
+                try walk(n.right, followInline, Walker, walker);
             },
             .star,
             .plus,
             .optional,
-            .not,
+            // .not,
             .negative,
             .positive,
             .no_cap,
@@ -530,7 +750,7 @@ pub const Pattern = union(enum) {
             .repeat => |n| try walk(n.patt, followInline, Walker, walker),
             .escape => |n| try walk(n.patt, followInline, Walker, walker),
             .grammar => |n| {
-                var iter = n.defs.iterator();
+                var iter = n.rules.iterator();
                 while (iter.next()) |e|
                     try walk(e.value_ptr, followInline, Walker, walker);
             },
@@ -546,13 +766,13 @@ pub const Pattern = union(enum) {
     pub const start_name = "--start--";
 
     pub fn rulesToGrammar(allocator: mem.Allocator, rules: []const Rule, start: []const u8) !Pattern {
-        var defs = Grammar{};
-        errdefer defs.deinit(allocator);
+        var rules_map = RuleMap{};
+        errdefer rules_map.deinit(allocator);
         for (rules) |kv| {
-            try defs.putNoClobber(allocator, kv[0], try kv[1].normalize(allocator));
+            try rules_map.putNoClobber(allocator, kv[0], try kv[1].normalize(allocator));
         }
-        try defs.put(allocator, start_name, .{ .non_term = .{ .name = start } });
-        return .{ .grammar = .{ .defs = defs, .start = start } };
+        try rules_map.put(allocator, start_name, .{ .non_term = .{ .name = start } });
+        return .{ .grammar = .{ .rules = rules_map, .start = start } };
     }
 
     /// convert slice nodes to their recursive counterparts (.{alt,seq}_slice => .{alt,seq})
@@ -596,7 +816,7 @@ pub const Pattern = union(enum) {
             .optional,
             .negative,
             .positive,
-            .not,
+            // .not,
             .no_cap,
             .search,
             => |n, tag| {
@@ -604,20 +824,19 @@ pub const Pattern = union(enum) {
                 nn.* = try n.normalize(allocator);
                 return @unionInit(Pattern, @tagName(tag), nn);
             },
-            .repeat => |n| return n.patt.normalize(allocator),
-            .cap, .memo => |n| return n.patt.normalize(allocator),
-            .check => |n| return n.patt.normalize(allocator),
-            .err => |n| return n.recover.normalize(allocator),
-            .escape => |n| return n.patt.normalize(allocator),
+            inline .repeat, .cap, .memo, .check, .escape => |n, tag| {
+                var tmp = p;
+                @field(tmp, @tagName(tag)).patt.* = try n.patt.normalize(allocator);
+                return tmp;
+            },
+            .err => |n| {
+                var tmp = p;
+                tmp.err.recover.* = try n.recover.normalize(allocator);
+                return tmp;
+            },
             else => {},
         }
         return p;
-    }
-
-    pub fn compileAndOptimize(p: Pattern, allocator: mem.Allocator) !Program {
-        const c = try p.compile(allocator);
-        // try optimize(c); // TODO
-        return c;
     }
 
     pub fn count(p: Pattern) usize {
@@ -659,26 +878,31 @@ pub const Pattern = union(enum) {
         switch (p.*) {
             .alt_slice => unreachable,
             .seq_slice => unreachable,
-            .grammar => unreachable,
+            .grammar => |*g| {
+                var iter = g.rules.iterator();
+                while (iter.next()) |e| {
+                    e.value_ptr.deinit(allocator);
+                }
+                g.rules.deinit(allocator);
+            },
             .alt, .seq => |n| {
-                if (n.left) |l| {
-                    l.deinit(allocator);
-                    allocator.destroy(l);
-                }
-                if (n.right) |r| {
-                    r.deinit(allocator);
-                    allocator.destroy(r);
-                }
+                n.left.deinit(allocator);
+                allocator.destroy(n.left);
+                n.right.deinit(allocator);
+                allocator.destroy(n.right);
             },
             .star,
             .plus,
             .optional,
             .negative,
             .positive,
-            .not,
+            // .not,
             .no_cap,
             .search,
-            => |n| n.deinit(allocator),
+            => |n| {
+                n.deinit(allocator);
+                allocator.destroy(n);
+            },
             .cap => |n| n.patt.deinit(allocator),
             .memo => |n| n.patt.deinit(allocator),
             .check => |n| n.patt.deinit(allocator),
@@ -692,6 +916,7 @@ pub const Pattern = union(enum) {
             .dot,
             .empty_op,
             .empty,
+            .null,
             => {},
         }
     }
@@ -711,20 +936,20 @@ test "Pattern.normalize seq" {
     defer seq.deinit(testing.allocator);
 
     try testing.expect(seq == .seq);
-    try testing.expect(seq.seq.left != null);
-    try testing.expectEqual(Pattern.Tag.seq, seq.seq.left.?.*);
-    try testing.expect(seq.seq.right != null);
-    try testing.expectEqual(Pattern.Tag.non_term, seq.seq.right.?.*);
-    try testing.expectEqualStrings("c", seq.seq.right.?.non_term.name);
+    try testing.expect(seq.seq.left.* != .empty);
+    try testing.expectEqual(Pattern.Tag.seq, seq.seq.left.*);
+    try testing.expect(seq.seq.right.* != .empty);
+    try testing.expectEqual(Pattern.Tag.non_term, seq.seq.right.*);
+    try testing.expectEqualStrings("c", seq.seq.right.non_term.name);
 
-    const seq2 = seq.seq.left.?.*;
+    const seq2 = seq.seq.left.*;
     try testing.expect(seq2 == .seq);
-    try testing.expect(seq2.seq.left != null);
-    try testing.expect(seq2.seq.left.?.* == .non_term);
-    try testing.expectEqualStrings("a", seq2.seq.left.?.non_term.name);
-    try testing.expect(seq2.seq.right != null);
-    try testing.expectEqual(Pattern.Tag.non_term, seq2.seq.right.?.*);
-    try testing.expectEqualStrings("b", seq2.seq.right.?.non_term.name);
+    try testing.expect(seq2.seq.left.* != .empty);
+    try testing.expect(seq2.seq.left.* == .non_term);
+    try testing.expectEqualStrings("a", seq2.seq.left.non_term.name);
+    try testing.expect(seq2.seq.right.* != .empty);
+    try testing.expectEqual(Pattern.Tag.non_term, seq2.seq.right.*);
+    try testing.expectEqualStrings("b", seq2.seq.right.non_term.name);
 }
 
 test "Pattern.normalize alt" {
@@ -741,20 +966,20 @@ test "Pattern.normalize alt" {
     defer alt.deinit(testing.allocator);
 
     try testing.expect(alt == .alt);
-    try testing.expect(alt.alt.left != null);
-    try testing.expectEqual(Pattern.Tag.non_term, alt.alt.left.?.*);
-    try testing.expectEqualStrings("a", alt.alt.left.?.non_term.name);
-    try testing.expect(alt.alt.right != null);
-    try testing.expectEqual(Pattern.Tag.alt, alt.alt.right.?.*);
+    try testing.expect(alt.alt.left.* != .empty);
+    try testing.expectEqual(Pattern.Tag.non_term, alt.alt.left.*);
+    try testing.expectEqualStrings("a", alt.alt.left.non_term.name);
+    try testing.expect(alt.alt.right.* != .empty);
+    try testing.expectEqual(Pattern.Tag.alt, alt.alt.right.*);
 
-    const alt2 = alt.alt.right.?.*;
+    const alt2 = alt.alt.right.*;
     try testing.expect(alt2 == .alt);
-    try testing.expect(alt2.alt.left != null);
-    try testing.expectEqual(Pattern.Tag.non_term, alt2.alt.left.?.*);
-    try testing.expectEqualStrings("b", alt2.alt.left.?.non_term.name);
-    try testing.expect(alt2.alt.right != null);
-    try testing.expectEqual(Pattern.Tag.non_term, alt2.alt.right.?.*);
-    try testing.expectEqualStrings("c", alt2.alt.right.?.non_term.name);
+    try testing.expect(alt2.alt.left.* != .empty);
+    try testing.expectEqual(Pattern.Tag.non_term, alt2.alt.left.*);
+    try testing.expectEqualStrings("b", alt2.alt.left.non_term.name);
+    try testing.expect(alt2.alt.right.* != .empty);
+    try testing.expectEqual(Pattern.Tag.non_term, alt2.alt.right.*);
+    try testing.expectEqualStrings("c", alt2.alt.right.non_term.name);
 }
 
 pub const Error = error{ ParseFailure, NoSpaceLeft };
@@ -775,8 +1000,9 @@ pub fn CharRange(start: u8, end: u8) Pattern {
     return .{ .class = class };
 }
 
-pub fn String(expected: []const u8) Pattern {
-    return .{ .literal = expected };
+pub fn String(s: []const u8) Pattern {
+    assert(s.len > 0);
+    return .{ .literal = s };
 }
 
 pub inline fn Select(comptime patterns: []const Pattern) Pattern {
@@ -784,9 +1010,29 @@ pub inline fn Select(comptime patterns: []const Pattern) Pattern {
     return .{ .alt_slice = &tmp };
 }
 
+/// use inplace of Select() when 'patterns' isn't known at comptime
+pub inline fn SelectBuf(comptime len: usize, patterns: []const Pattern) Pattern {
+    if (patterns.len > len)
+        std.debug.panic("len={} < patterns.len={}", .{ len, patterns.len });
+    var buf: [len]Pattern = undefined;
+    const dest = buf[0..patterns.len];
+    @memcpy(dest, patterns);
+    return .{ .alt_slice = dest };
+}
+
 pub inline fn Group(comptime patterns: []const Pattern) Pattern {
     var tmp = patterns[0..patterns.len].*;
     return .{ .seq_slice = &tmp };
+}
+
+/// use inplace of Group() when 'patterns' isn't known at comptime
+pub inline fn GroupBuf(comptime len: usize, patterns: []const Pattern) Pattern {
+    if (patterns.len > len)
+        std.debug.panic("len={} < patterns.len={}", .{ len, patterns.len });
+    var buf: [len]Pattern = undefined;
+    const dest = buf[0..patterns.len];
+    @memcpy(dest, patterns);
+    return .{ .seq_slice = dest };
 }
 
 pub inline fn Repeat(n: u8, pattern: Pattern) Pattern {
@@ -836,10 +1082,11 @@ pub inline fn Escape(pattern: Pattern, escapeFn: EscapeFn) Pattern {
     return .{ .escape = .{ .patt = &tmp, .escapeFn = escapeFn } };
 }
 
-pub inline fn Not(pattern: Pattern) Pattern {
-    var tmp = pattern;
-    return .{ .not = &tmp };
-}
+// TODO implement. removed to avoid confusion w/ gpeg.Not vn Negative()
+// pub inline fn Not(pattern: Pattern) Pattern {
+//     var tmp = pattern;
+//     return .{ .not = &tmp };
+// }
 
 pub inline fn Search(pattern: Pattern) Pattern {
     var tmp = pattern;
@@ -850,6 +1097,71 @@ pub const Ignore = NoCapture;
 pub inline fn NoCapture(pattern: Pattern) Pattern {
     var tmp = pattern;
     return .{ .no_cap = &tmp };
+}
+
+fn validateChecker(comptime C: type) isa.CheckerFn {
+    const cinfo = @typeInfo(C);
+    if (cinfo != .Pointer)
+        @compileError("Expected checker param to be a Pointer. got '" ++ @tagName(cinfo) ++ "'");
+    const Child = cinfo.Pointer.child;
+    if (!@hasDecl(Child, "check"))
+        @compileError("checker param missing pub check() method.");
+    if (@TypeOf(Child.check) != isa.CheckerFnT)
+        @compileError("checker.check() method must have type " ++ @typeName(isa.CheckerFn));
+    return Child.check;
+}
+
+// Check marks a pattern to be checked with the given checker.
+pub inline fn Check(
+    pattern: Pattern,
+    checker: anytype,
+) Pattern {
+    const checker_fn = validateChecker(@TypeOf(checker));
+    var tmp = pattern;
+    return .{ .check = .{
+        .patt = &tmp,
+        .checker = .{
+            .func = checker_fn,
+            .ptr = checker,
+        },
+        .id = 0,
+        .flag = 0,
+    } };
+}
+
+pub inline fn CheckFlags(
+    pattern: Pattern,
+    checker: anytype,
+    id: u32,
+    flag: u32,
+) Pattern {
+    const checker_fn = validateChecker(@TypeOf(checker));
+    var tmp = pattern;
+    return .{
+        .check = .{
+            .patt = &tmp,
+            .checker = .{
+                .func = checker_fn,
+                .ptr = checker,
+            },
+            .id = id,
+            .flag = flag,
+        },
+    };
+}
+
+pub fn Set(set: Charset) Pattern {
+    return .{ .class = set };
+}
+
+pub fn NonTerm(name: []const u8) Pattern {
+    return .{ .non_term = .{ .name = name } };
+}
+
+pub fn initCharset(chars: []const u8) Charset {
+    var set = Charset.initEmpty();
+    for (chars) |c| set.set(c);
+    return set;
 }
 
 pub fn parse(pat: Pattern, stream: *Stream, ctx: *Context) ![]const u8 {
@@ -1047,13 +1359,14 @@ test AnyOf {
     try expectFailure("d", any2, error.ParseFailure);
 }
 
-test Not {
-    const dash = comptime Char('-');
-    const slash = comptime Char('\\');
-    const not_slash_dash = Group(&.{ Not(slash), dash });
-    try expectParse("-", not_slash_dash, "");
-    try expectFailure("\\-", not_slash_dash, error.ParseFailure);
-}
+// TODO uncomment when Not() is added back
+// test Not {
+//     const dash = comptime Char('-');
+//     const slash = comptime Char('\\');
+//     const not_slash_dash = Group(&.{ Not(slash), dash });
+//     try expectParse("-", not_slash_dash, "");
+//     try expectFailure("\\-", not_slash_dash, error.ParseFailure);
+// }
 
 test Search {
     const search = Search(foo);
