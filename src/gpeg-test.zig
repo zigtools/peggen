@@ -1,6 +1,6 @@
 const std = @import("std");
-const Pg = @import("ParserGenerator.zig");
-const Pattern = Pg.Pattern;
+const pattern = @import("pattern.zig");
+const Pattern = pattern.Pattern;
 const Vm = @import("Vm.zig");
 const memo = @import("memo.zig");
 const isa = @import("isa.zig");
@@ -42,7 +42,7 @@ fn check(p_: Pattern, tests: []const PatternTest) !void {
 }
 
 test "Concat" {
-    const p = Pg.Group(&.{ Pg.String("ana"), Pg.String("hi") });
+    const p = pattern.Group(&.{ pattern.String("ana"), pattern.String("hi") });
 
     const tests = .{
         .{ "ana", -1 },
@@ -66,7 +66,7 @@ const U8Checker = struct {
 
 test "Checker" {
     var u8checker = U8Checker{};
-    const p = Pg.Check(Pg.OneOrMore(Pg.CharRange('0', '9')), &u8checker);
+    const p = pattern.Check(pattern.OneOrMore(pattern.CharRange('0', '9')), &u8checker);
 
     const tests = .{
         .{ "123", 3 },
@@ -79,7 +79,7 @@ test "Checker" {
 }
 
 test "Or" {
-    const p = Pg.Select(&.{ Pg.String("ana"), Pg.String("hi") });
+    const p = pattern.Select(&.{ pattern.String("ana"), pattern.String("hi") });
 
     const tests = .{
         .{ "ana", 3 },
@@ -93,7 +93,7 @@ test "Or" {
 
 test "Repeat" {
     {
-        const p = Pg.ZeroOrMore(Pg.String("ana"));
+        const p = pattern.ZeroOrMore(pattern.String("ana"));
         const tests = .{
             .{ "", 0 },
             .{ "ana", 3 },
@@ -106,7 +106,7 @@ test "Repeat" {
     }
 
     {
-        const p = Pg.OneOrMore(Pg.String("hi"));
+        const p = pattern.OneOrMore(pattern.String("hi"));
         const tests = .{
             .{ "", -1 },
             .{ "hi", 2 },
@@ -118,7 +118,7 @@ test "Repeat" {
     }
 
     {
-        const p = Pg.Group(&.{ Pg.OneOrMore(Pg.AnyOf("01")), Pg.ZeroOrMore(Pg.AnyOf("abc")) });
+        const p = pattern.Group(&.{ pattern.OneOrMore(pattern.AnyOf("01")), pattern.ZeroOrMore(pattern.AnyOf("abc")) });
         const tests = .{
             .{ "01", 2 },
             .{ "01abaabbc", 9 },
@@ -131,7 +131,7 @@ test "Repeat" {
 }
 
 test "Predicate" {
-    const p = Pg.Negative(Pg.String("ana"));
+    const p = pattern.Negative(pattern.String("ana"));
     {
         const tests = .{
             .{ "ana", -1 },
@@ -141,8 +141,8 @@ test "Predicate" {
         try check(p, &tests);
     }
     {
-        const p1 = Pg.Negative(Pg.Negative(Pg.String("ana")));
-        const p2 = Pg.Positive(Pg.String("ana"));
+        const p1 = pattern.Negative(pattern.Negative(pattern.String("ana")));
+        const p2 = pattern.Positive(pattern.String("ana"));
         const tests = .{
             .{ "ana", 0 },
             .{ "hi", -1 },
@@ -154,7 +154,7 @@ test "Predicate" {
 }
 
 test "Any" {
-    const p = Pg.Group(&.{ Pg.Any(5), Pg.String("ana") });
+    const p = pattern.Group(&.{ pattern.Any(5), pattern.String("ana") });
     const tests = .{
         .{ "helloana", 8 },
         .{ "hiana", -1 },
@@ -164,7 +164,7 @@ test "Any" {
 }
 
 test "Optional" {
-    const p = Pg.Group(&.{ Pg.String("ana"), Pg.Optional(Pg.String("hello")) });
+    const p = pattern.Group(&.{ pattern.String("ana"), pattern.Optional(pattern.String("hello")) });
     const tests = .{
         .{ "ana", 3 },
         .{ "anahe", 3 },
@@ -175,7 +175,7 @@ test "Optional" {
 }
 
 test "Set" {
-    const p = Pg.OneOrMore(Pg.CharRange('0', '9'));
+    const p = pattern.OneOrMore(pattern.CharRange('0', '9'));
     const tests = .{
         .{ "hi", -1 },
         .{ "1002", 4 },
@@ -190,16 +190,16 @@ test "Grammar" {
     // S <- <B> / (![()] .)+
     // B <- '(' <S> ')'
 
-    const set = comptime Pg.initCharset("()");
-    const S = Pg.Select(&.{
-        Pg.NonTerm("B"),
-        Pg.OneOrMore(Pg.Group(&.{ Pg.Negative(Pg.Set(set)), Pg.Any(1) })),
+    const set = comptime pattern.initCharset("()");
+    const S = pattern.Select(&.{
+        pattern.NonTerm("B"),
+        pattern.OneOrMore(pattern.Group(&.{ pattern.Negative(pattern.Set(set)), pattern.Any(1) })),
     });
-    const B = Pg.Group(&.{
-        Pg.Group(&.{ Pg.String("("), Pg.NonTerm("S") }),
-        Pg.String(")"),
+    const B = pattern.Group(&.{
+        pattern.Group(&.{ pattern.String("("), pattern.NonTerm("S") }),
+        pattern.String(")"),
     });
-    const p = try Pg.Pattern.rulesToGrammar(talloc, &.{
+    const p = try pattern.Pattern.rulesToGrammar(talloc, &.{
         .{ "S", S },
         .{ "B", B },
     }, "S");
@@ -213,11 +213,11 @@ test "Grammar" {
 }
 
 test "TailCall" {
-    const X = Pg.Select(&.{
-        Pg.String("ana"),
-        Pg.Group(&.{ Pg.Any(1), Pg.NonTerm("X") }),
+    const X = pattern.Select(&.{
+        pattern.String("ana"),
+        pattern.Group(&.{ pattern.Any(1), pattern.NonTerm("X") }),
     });
-    const p = try Pg.Pattern.rulesToGrammar(talloc, &.{
+    const p = try pattern.Pattern.rulesToGrammar(talloc, &.{
         .{ "X", X },
     }, "X");
     const tests = .{
@@ -230,9 +230,9 @@ test "TailCall" {
 }
 
 test "UnionSet" {
-    const p = Pg.OneOrMore(Pg.Select(&.{
-        Pg.CharRange('a', 'z'),
-        Pg.CharRange('A', 'Z'),
+    const p = pattern.OneOrMore(pattern.Select(&.{
+        pattern.CharRange('a', 'z'),
+        pattern.CharRange('A', 'Z'),
     }));
     const tests = .{
         .{ "Hello", 5 },
@@ -244,7 +244,7 @@ test "UnionSet" {
 
 test "Search" {
     {
-        const p = Pg.Search(Pg.Group(&.{Pg.String("ana")}));
+        const p = pattern.Search(pattern.Group(&.{pattern.String("ana")}));
         const tests = .{
             .{ "hello ana hello", 9 },
             .{ "hello", -1 },
@@ -255,7 +255,7 @@ test "Search" {
 
     // search for last occurrence
     {
-        const p = Pg.OneOrMore(Pg.Search(Pg.String("ana")));
+        const p = pattern.OneOrMore(pattern.Search(pattern.String("ana")));
         const tests = .{
             .{ "hello ana hello", 9 },
             .{ "hello", -1 },
@@ -272,20 +272,20 @@ test "ArithmeticGrammar" {
     // Term   <- <Number> / '(' <Expr> ')'
     // Number <- [0-9]+
 
-    const Expr = Pg.Group(&.{
-        Pg.NonTerm("Factor"),
-        Pg.ZeroOrMore(Pg.Group(&.{ Pg.AnyOf(&.{ '+', '-' }), Pg.NonTerm("Factor") })),
+    const Expr = pattern.Group(&.{
+        pattern.NonTerm("Factor"),
+        pattern.ZeroOrMore(pattern.Group(&.{ pattern.AnyOf(&.{ '+', '-' }), pattern.NonTerm("Factor") })),
     });
-    const Factor = Pg.Group(&.{
-        Pg.NonTerm("Term"),
-        Pg.ZeroOrMore(Pg.Group(&.{ Pg.AnyOf(&.{ '*', '/' }), Pg.NonTerm("Term") })),
+    const Factor = pattern.Group(&.{
+        pattern.NonTerm("Term"),
+        pattern.ZeroOrMore(pattern.Group(&.{ pattern.AnyOf(&.{ '*', '/' }), pattern.NonTerm("Term") })),
     });
-    const Number = Pg.OneOrMore(Pg.CharRange('0', '9'));
-    const Term = Pg.Select(&.{
-        Pg.NonTerm("Number"),
-        Pg.Group(&.{ Pg.Char('('), Pg.NonTerm("Expr"), Pg.Char(')') }),
+    const Number = pattern.OneOrMore(pattern.CharRange('0', '9'));
+    const Term = pattern.Select(&.{
+        pattern.NonTerm("Number"),
+        pattern.Group(&.{ pattern.Char('('), pattern.NonTerm("Expr"), pattern.Char(')') }),
     });
-    const p = try Pg.Pattern.rulesToGrammar(talloc, &.{
+    const p = try pattern.Pattern.rulesToGrammar(talloc, &.{
         .{ "Expr", Expr },
         .{ "Factor", Factor },
         .{ "Term", Term },
@@ -301,16 +301,16 @@ test "ArithmeticGrammar" {
 }
 
 test "BackReference" {
-    const word = Pg.OneOrMore(Pg.String("/"));
+    const word = pattern.OneOrMore(pattern.String("/"));
     var br = isa.BackReference{ .allocator = talloc };
     defer br.deinit();
-    const p = Pg.GroupBuf(3, &.{
-        Pg.CheckFlags(word, &br, 0, isa.Ref.code(.def)),
-        Pg.ZeroOrMore(Pg.GroupBuf(2, &.{
-            Pg.Negative(Pg.CheckFlags(.empty, &br, 0, isa.Ref.code(.use))),
-            Pg.Any(1),
+    const p = pattern.GroupBuf(3, &.{
+        pattern.CheckFlags(word, &br, 0, isa.Ref.code(.def)),
+        pattern.ZeroOrMore(pattern.GroupBuf(2, &.{
+            pattern.Negative(pattern.CheckFlags(.empty, &br, 0, isa.Ref.code(.use))),
+            pattern.Any(1),
         })),
-        Pg.CheckFlags(.empty, &br, 0, isa.Ref.code(.use)),
+        pattern.CheckFlags(.empty, &br, 0, isa.Ref.code(.use)),
     });
     const tests = .{
         .{ "/// hello world ///", 19 },

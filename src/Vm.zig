@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const Pg = @import("ParserGenerator.zig");
+const pattern = @import("pattern.zig");
 const Vm = @This();
 const memo = @import("memo.zig");
 const input = @import("input.zig");
@@ -9,7 +9,7 @@ const tree = @import("tree.zig");
 const Interval = memo.Interval;
 
 /// list of charsets
-sets: std.ArrayListUnmanaged(Pg.Charset) = .{},
+sets: std.ArrayListUnmanaged(pattern.Charset) = .{},
 /// list of error messages
 errors: std.ArrayListUnmanaged([]const u8) = .{},
 /// list of checker functions
@@ -519,7 +519,7 @@ fn encodeBool(b: bool) u8 {
 // Adds the set to the code's list of charsets, and returns the index it was
 // added at. If there are duplicate charsets, this may not actually insert
 // the new charset.
-fn addSet(code: *Vm, allocator: mem.Allocator, set: Pg.Charset) !usize {
+fn addSet(code: *Vm, allocator: mem.Allocator, set: pattern.Charset) !usize {
     for (code.sets.items, 0..) |s, i| {
         if (set.eql(s)) return i;
     }
@@ -706,7 +706,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 const set = decodeSet(idata.items[ip + 1 ..], vm.sets.items);
                 blk: {
                     if (src.peek()) |in| {
-                        std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), Pg.CharsetFmt.init(set) });
+                        std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), pattern.CharsetFmt.init(set) });
                         if (set.isSet(in)) {
                             _ = try src.advance(1);
                             ip += sz(.set);
@@ -902,7 +902,7 @@ fn decodeU24(b: []const u8) u32 {
     return (ii1 << 16) | ii2;
 }
 
-fn decodeSet(b: []const u8, sets: []const Pg.Charset) Pg.Charset {
+fn decodeSet(b: []const u8, sets: []const pattern.Charset) pattern.Charset {
     const i = decodeU8(b);
     return sets[i];
 }

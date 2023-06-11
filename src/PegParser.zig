@@ -3,13 +3,13 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const testing = std.testing;
 const Stream = @import("Stream.zig");
-const Pg = @import("ParserGenerator.zig");
+const p = @import("pattern.zig");
 
 const PegParser = @This();
 
 allocator: mem.Allocator,
 stream: Stream,
-ctx: Pg.Context,
+ctx: p.Context,
 
 pub fn init(allocator: mem.Allocator, contents: []const u8, output: []u8, file_path: []const u8) PegParser {
     return .{
@@ -218,9 +218,9 @@ pub const Expression = struct {
                     // characters.
                     // this quick and dirty - maybe hacky - escaper does the job.
                     // it just replaces '\-' w/ '-'
-                    const any_char = comptime Pg.Select(&.{
-                        Pg.Escape(
-                            Pg.Group(&.{ backslash, dash }),
+                    const any_char = comptime p.Select(&.{
+                        p.Escape(
+                            p.Group(&.{ backslash, dash }),
                             struct {
                                 fn func(slice: []const u8, s: *Stream) !void {
                                     if (slice.len == 2 and slice[0] == '\\' and slice[1] == '-') {
@@ -229,14 +229,14 @@ pub const Expression = struct {
                                 }
                             }.func,
                         ),
-                        Pg.Any(1),
+                        p.Any(1),
                     });
 
-                    const ac_dash_ac = comptime Pg.Group(&.{ any_char, dash, any_char });
-                    const range_any = Pg.Select(&.{ ac_dash_ac, any_char });
+                    const ac_dash_ac = comptime p.Group(&.{ any_char, dash, any_char });
+                    const range_any = p.Select(&.{ ac_dash_ac, any_char });
                     var stream = Stream.init(input, &buf);
-                    var ctx = Pg.Context{ .file_path = "<set range ctx>" };
-                    var parser_iter = Pg.iterator(range_any, &stream, &ctx);
+                    var ctx = p.Context{ .file_path = "<set range ctx>" };
+                    var parser_iter = p.iterator(range_any, &stream, &ctx);
 
                     const count = parser_iter.count() catch |e| {
                         std.log.err("{} during parser_iter.count() input={s}", .{ e, input });
@@ -339,8 +339,8 @@ test "Expression.format" {
             \\"'"
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -349,8 +349,8 @@ test "Expression.format" {
             \\'"'
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -359,8 +359,8 @@ test "Expression.format" {
             \\[\200-\277]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [20]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -369,8 +369,8 @@ test "Expression.format" {
             \\'\364'
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -379,8 +379,8 @@ test "Expression.format" {
             \\"\\\\"
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -389,8 +389,8 @@ test "Expression.format" {
             \\[nr\\t'"]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const expr = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const expr = try parser.parsePrimary();
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{expr}));
     }
@@ -410,41 +410,41 @@ pub const Grammar = struct {
     }
 };
 
-fn runParser(self: *PegParser, pattern: Pg.Pattern) ![]const u8 {
-    return try Pg.parse(pattern, &self.stream, &self.ctx);
+fn runParser(self: *PegParser, pattern: p.Pattern) ![]const u8 {
+    return try p.parse(pattern, &self.stream, &self.ctx);
 }
 
-const alpha = Pg.CharFn(std.ascii.isAlphabetic);
-const alpha_num = Pg.CharFn(std.ascii.isAlphanumeric);
-const ident_others = Pg.Select(&.{Pg.Char('_')});
-const ident_succ = Pg.Select(&.{ alpha_num, ident_others });
-const ident = Pg.Group(&.{
+const alpha = p.CharFn(std.ascii.isAlphabetic);
+const alpha_num = p.CharFn(std.ascii.isAlphanumeric);
+const ident_others = p.Select(&.{p.Char('_')});
+const ident_succ = p.Select(&.{ alpha_num, ident_others });
+const ident = p.Group(&.{
     alpha,
-    Pg.ZeroOrMore(ident_succ),
+    p.ZeroOrMore(ident_succ),
     spacing,
 });
 
-const leftarrow = Pg.Group(&.{ Pg.String("<-"), spacing });
-const slash = Pg.Group(&.{ Pg.Char('/'), spacing });
+const leftarrow = p.Group(&.{ p.String("<-"), spacing });
+const slash = p.Group(&.{ p.Char('/'), spacing });
 
 /// Spacing   <- (Space / Comment)*
 /// Comment   <- '#' (!EndOfLine .)* EndOfLine
 /// Space   <- ' ' / '\t' / EndOfLine
 /// EndOfLine <- '\r\n' / '\n' / '\r'
-const ws = Pg.CharFn(std.ascii.isWhitespace);
-const wss = Pg.ZeroOrMore(ws);
+const ws = p.CharFn(std.ascii.isWhitespace);
+const wss = p.ZeroOrMore(ws);
 
-const space_or_tab = Pg.AnyOf(" \t");
-const nl_or_lf = Pg.AnyOf("\n\r");
-const end_of_line = Pg.Select(&.{ Pg.String("\r\n"), nl_or_lf });
-const space = Pg.Select(&.{ space_or_tab, end_of_line });
-const hash = Pg.Char('#');
-const comment = Pg.Group(&.{
-    Pg.Positive(hash),
-    Pg.ZeroOrMore(Pg.Group(&.{ Pg.Negative(end_of_line), Pg.Any(1) })),
+const space_or_tab = p.AnyOf(" \t");
+const nl_or_lf = p.AnyOf("\n\r");
+const end_of_line = p.Select(&.{ p.String("\r\n"), nl_or_lf });
+const space = p.Select(&.{ space_or_tab, end_of_line });
+const hash = p.Char('#');
+const comment = p.Group(&.{
+    p.Positive(hash),
+    p.ZeroOrMore(p.Group(&.{ p.Negative(end_of_line), p.Any(1) })),
     end_of_line,
 });
-pub const spacing = Pg.Ignore(Pg.ZeroOrMore(Pg.Select(&.{ space, comment })));
+pub const spacing = p.Ignore(p.ZeroOrMore(p.Select(&.{ space, comment })));
 
 /// Print the string as escaped contents of a square set, double-quoted string
 /// or single-quoted string.
@@ -537,42 +537,42 @@ pub fn parseEscapeSequence(slice: []const u8, stream: *Stream) !void {
 ///          / '\\' [0-7][0-7]?
 ///          / '\\' '-'
 ///          / !'\\' .
-const dot = Pg.Group(&.{ Pg.Char('.'), spacing });
-const backslash = Pg.Char('\\');
-const escapees = Pg.AnyOf(
+const dot = p.Group(&.{ p.Char('.'), spacing });
+const backslash = p.Char('\\');
+const escapees = p.AnyOf(
     \\abefnrtv'"[]\
 );
-const zero_to_three = Pg.CharRange('0', '3');
-const zero_to_seven = Pg.CharRange('0', '7');
-const char = Pg.Select(&.{
-    Pg.Escape(
-        Pg.Select(
+const zero_to_three = p.CharRange('0', '3');
+const zero_to_seven = p.CharRange('0', '7');
+const char = p.Select(&.{
+    p.Escape(
+        p.Select(
             &.{
-                Pg.Group(&.{ backslash, escapees }),
-                Pg.Group(&.{ backslash, zero_to_three, zero_to_seven, zero_to_seven }),
-                Pg.Group(&.{ backslash, zero_to_seven, Pg.Optional(zero_to_seven) }),
-                Pg.Group(&.{ backslash, dash }),
+                p.Group(&.{ backslash, escapees }),
+                p.Group(&.{ backslash, zero_to_three, zero_to_seven, zero_to_seven }),
+                p.Group(&.{ backslash, zero_to_seven, p.Optional(zero_to_seven) }),
+                p.Group(&.{ backslash, dash }),
             },
         ),
         parseEscapeSequence,
     ),
-    Pg.Group(&.{ Pg.Negative(backslash), dot }),
-    Pg.CharFn(std.ascii.isPrint),
+    p.Group(&.{ p.Negative(backslash), dot }),
+    p.CharFn(std.ascii.isPrint),
 });
 
-const dash = Pg.Char('-');
-const range1 = Pg.Group(&.{ char, dash, char });
+const dash = p.Char('-');
+const range1 = p.Group(&.{ char, dash, char });
 /// Range   <- Char '-' Char / Char
-const range = Pg.Select(&.{ range1, char });
-const lbrace = Pg.Char('[');
-const rbrace = Pg.Char(']');
+const range = p.Select(&.{ range1, char });
+const lbrace = p.Char('[');
+const rbrace = p.Char(']');
 
 /// Class <- '[' (!']' Range)* ']' Spacing
 pub fn parseClass(self: *PegParser) ![]const u8 {
-    const class = Pg.Group(&.{
+    const class = p.Group(&.{
         lbrace,
-        Pg.ZeroOrMore(Pg.Group(&.{
-            Pg.Negative(rbrace),
+        p.ZeroOrMore(p.Group(&.{
+            p.Negative(rbrace),
             range,
         })),
         rbrace,
@@ -585,19 +585,19 @@ test parseClass {
     {
         const input = "[a-zA-Z_]";
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const r = try p.parseClass();
+        var parser = init(undefined, input, &output, "<test>");
+        const r = try parser.parseClass();
         try testing.expectEqualStrings(input, r);
     }
     {
         const input = "[ab-z]";
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const r = try p.parseClass();
+        var parser = init(undefined, input, &output, "<test>");
+        const r = try parser.parseClass();
         try testing.expectEqualStrings(input, r);
         var stream = Stream.init(input[1 .. input.len - 1], &output);
-        var ctx = Pg.Context{ .file_path = "<test>" };
-        var iter = Pg.iterator(range, &stream, &ctx);
+        var ctx = p.Context{ .file_path = "<test>" };
+        var iter = p.iterator(range, &stream, &ctx);
         try testing.expectEqualStrings("a", (try iter.next()).?);
         try testing.expectEqualStrings("b-z", (try iter.next()).?);
     }
@@ -606,25 +606,25 @@ test parseClass {
             \\[abefnrtv'"\[\]\\]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const r = try p.parseClass();
+        var parser = init(undefined, input, &output, "<test>");
+        const r = try parser.parseClass();
         try testing.expectEqualStrings(
             \\[abefnrtv'"[]\]
         , r);
     }
 }
 
-const single_quote = Pg.Char('\'');
-const double_quote = Pg.Char('"');
-const lit_single = Pg.Group(
-    &.{ single_quote, Pg.ZeroOrMore(Pg.Group(&.{
-        Pg.Negative(single_quote),
+const single_quote = p.Char('\'');
+const double_quote = p.Char('"');
+const lit_single = p.Group(
+    &.{ single_quote, p.ZeroOrMore(p.Group(&.{
+        p.Negative(single_quote),
         char,
     })), single_quote, spacing },
 );
-const lit_double = Pg.Group(
-    &.{ double_quote, Pg.ZeroOrMore(Pg.Group(&.{
-        Pg.Negative(double_quote),
+const lit_double = p.Group(
+    &.{ double_quote, p.ZeroOrMore(p.Group(&.{
+        p.Negative(double_quote),
         char,
     })), double_quote, spacing },
 );
@@ -632,14 +632,14 @@ const lit_double = Pg.Group(
 /// Literal   <- ['] (!['] Char )* ['] Spacing
 ///            / ["] (!["] Char )* ["] Spacing
 pub fn parseLiteral(self: *PegParser) ![]const u8 {
-    const literal = Pg.Select(&.{ lit_single, lit_double });
+    const literal = p.Select(&.{ lit_single, lit_double });
     return try self.runParser(literal);
 }
 
-const lparen = Pg.Char('(');
-const rparen = Pg.Char(')');
-const open = Pg.Group(&.{ lparen, spacing });
-const close = Pg.Group(&.{ rparen, spacing });
+const lparen = p.Char('(');
+const rparen = p.Char(')');
+const open = p.Group(&.{ lparen, spacing });
+const close = p.Group(&.{ rparen, spacing });
 
 /// Primary   <- Identifier !LEFTARROW
 ///      / OPEN Expression CLOSE
@@ -647,8 +647,8 @@ const close = Pg.Group(&.{ rparen, spacing });
 ///      / Class
 ///      / DOT
 pub fn parsePrimary(self: *PegParser) anyerror!Expression {
-    const p1 = Pg.Group(&.{ ident, leftarrow });
-    if (self.runParser(Pg.Positive(p1))) |_|
+    const p1 = p.Group(&.{ ident, leftarrow });
+    if (self.runParser(p.Positive(p1))) |_|
         return error.RuleEnd
     else |_| {}
 
@@ -685,8 +685,8 @@ test parsePrimary {
             \\EndOfFile
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        const i = try p.runParser(ident);
+        var parser = init(testing.allocator, input, &output, "<test>");
+        const i = try parser.runParser(ident);
         try testing.expectEqualStrings("EndOfFile", i);
     }
     {
@@ -694,8 +694,8 @@ test parsePrimary {
             \\[a-z]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        const e = try p.parsePrimary();
+        var parser = init(testing.allocator, input, &output, "<test>");
+        const e = try parser.parsePrimary();
         try testing.expect(e.body == .set);
         try testing.expect(e.body.set.kind == .positive);
     }
@@ -704,8 +704,8 @@ test parsePrimary {
             \\[^a-z]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        const e = try p.parsePrimary();
+        var parser = init(testing.allocator, input, &output, "<test>");
+        const e = try parser.parsePrimary();
         try testing.expect(e.body == .set);
         try testing.expect(e.body.set.kind == .negative);
         var buf: [10]u8 = undefined;
@@ -716,8 +716,8 @@ test parsePrimary {
             \\[+\-]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const r = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const r = try parser.parsePrimary();
         try testing.expectEqualStrings(input, r.body.set.values);
         var buf: [10]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{set}", .{r}));
@@ -727,8 +727,8 @@ test parsePrimary {
             \\[\200-\277]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(undefined, input, &output, "<test>");
-        const e = try p.parsePrimary();
+        var parser = init(undefined, input, &output, "<test>");
+        const e = try parser.parsePrimary();
         var buf: [20]u8 = undefined;
         try testing.expectEqualStrings(input, try std.fmt.bufPrint(&buf, "{}", .{e}));
     }
@@ -737,10 +737,10 @@ test parsePrimary {
 /// Suffix <- Primary (QUESTION / STAR / PLUS)?
 pub fn parseSuffix(self: *PegParser) !Expression {
     var primary = try self.parsePrimary();
-    const suffix_cont = Pg.Optional(Pg.Select(&.{
-        Pg.Group(&.{ Pg.Char('?'), spacing }),
-        Pg.Group(&.{ Pg.Char('*'), spacing }),
-        Pg.Group(&.{ Pg.Char('+'), spacing }),
+    const suffix_cont = p.Optional(p.Select(&.{
+        p.Group(&.{ p.Char('?'), spacing }),
+        p.Group(&.{ p.Char('*'), spacing }),
+        p.Group(&.{ p.Char('+'), spacing }),
     }));
     const cont = self.runParser(suffix_cont) catch unreachable;
     if (cont.len > 0) switch (cont[0]) {
@@ -752,8 +752,8 @@ pub fn parseSuffix(self: *PegParser) !Expression {
     return primary;
 }
 
-const and_ = Pg.Group(&.{ Pg.Char('&'), spacing });
-const not = Pg.Group(&.{ Pg.Char('!'), spacing });
+const and_ = p.Group(&.{ p.Char('&'), spacing });
+const not = p.Group(&.{ p.Char('!'), spacing });
 
 /// Prefix <- AND Suffix / NOT Suffix / Suffix
 pub fn parsePrefix(self: *PegParser) !Expression {
@@ -823,8 +823,8 @@ test parseExpression {
         \\A+ B
     ;
     var output: [input.len]u8 = undefined;
-    var p = init(testing.allocator, input, &output, "<test>");
-    var e = try p.parseExpression();
+    var parser = init(testing.allocator, input, &output, "<test>");
+    var e = try parser.parseExpression();
     defer e.deinit(testing.allocator);
     try testing.expectEqual(Expression.Body.Tag.group, e.body);
     try testing.expectEqual(@as(usize, 2), e.body.group.items.len);
@@ -847,8 +847,8 @@ test parseDefinition {
             \\Grammar   <- Spacing Definition+ EndOfFile
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        var r = try p.parseDefinition();
+        var parser = init(testing.allocator, input, &output, "<test>");
+        var r = try parser.parseDefinition();
         try testing.expectEqualStrings("Grammar", r.identifier);
         defer r.expression.deinit(testing.allocator);
         try testing.expectEqual(Expression.Body.Tag.group, r.expression.body);
@@ -859,8 +859,8 @@ test parseDefinition {
             \\Char    <- '\\' [abefnrtv'"\[\]\\]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        var r = try p.parseDefinition();
+        var parser = init(testing.allocator, input, &output, "<test>");
+        var r = try parser.parseDefinition();
         defer r.expression.deinit(testing.allocator);
         try testing.expectEqualStrings("Char", r.identifier);
         try testing.expectEqual(Expression.Body.Tag.group, r.expression.body);
@@ -874,8 +874,8 @@ test parseDefinition {
             \\         / '\\' [0-3][0-7][0-7]
         ;
         var output: [input.len]u8 = undefined;
-        var p = init(testing.allocator, input, &output, "<test>");
-        var r = try p.parseDefinition();
+        var parser = init(testing.allocator, input, &output, "<test>");
+        var r = try parser.parseDefinition();
         defer r.expression.deinit(testing.allocator);
         try testing.expectEqualStrings("Char", r.identifier);
         try testing.expectEqual(Expression.Body.Tag.select, r.expression.body);
@@ -916,8 +916,8 @@ test parseGrammar {
         \\     /     Suffix
     ;
     var output: [input.len]u8 = undefined;
-    var p = init(testing.allocator, input, &output, "<test>");
-    var g = try p.parseGrammar();
+    var parser = init(testing.allocator, input, &output, "<test>");
+    var g = try parser.parseGrammar();
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), g.rules.items.len);
     try testing.expect(g.rules.items[0].expression.body == .group);

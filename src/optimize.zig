@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
-const Pg = @import("ParserGenerator.zig");
-const Ptr = Pg.Pattern.Ptr;
+const pattern = @import("pattern.zig");
+const Ptr = pattern.Pattern.Ptr;
 const isa = @import("isa.zig");
 
 pub fn get(p: Ptr) Ptr {
@@ -47,11 +47,11 @@ pub fn get(p: Ptr) Ptr {
             else
                 return p;
 
-            var set: Pg.Charset = undefined;
+            var set: pattern.Charset = undefined;
             switch (nn.get().*) {
                 .literal => |str| {
                     if (str.len != 1) return p;
-                    set = Pg.Charset.initEmpty();
+                    set = pattern.Charset.initEmpty();
                     set.set(str[0]);
                 },
                 .class => |lt| set = lt,
@@ -69,7 +69,7 @@ pub fn get(p: Ptr) Ptr {
                     return r;
                 },
                 .literal => |str| if (str.len == 1) {
-                    var res = Pg.Charset.initEmpty();
+                    var res = pattern.Charset.initEmpty();
                     res.set(str[0]);
                     r.* = .{ .class = res.differenceWith(set) };
                     return r;
@@ -82,7 +82,7 @@ pub fn get(p: Ptr) Ptr {
     return p;
 }
 
-pub fn combine(p1: Ptr, p2: Ptr) ?Pg.Charset {
+pub fn combine(p1: Ptr, p2: Ptr) ?pattern.Charset {
     switch (p1.*) {
         .literal => |str| {
             std.log.debug("combine lit", .{});
@@ -97,7 +97,7 @@ pub fn combine(p1: Ptr, p2: Ptr) ?Pg.Charset {
                 .literal => |str2| {
                     std.log.debug("combine lit 2", .{});
                     if (str2.len != 1) return null;
-                    var s = Pg.Charset.initEmpty();
+                    var s = pattern.Charset.initEmpty();
                     s.set(str[0]);
                     s.set(str2[0]);
                     return s;

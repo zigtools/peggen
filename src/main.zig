@@ -3,7 +3,7 @@ const Stream = @import("Stream.zig");
 const PegParser = @import("PegParser.zig");
 const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
-const Pg = @import("ParserGenerator.zig");
+const pattern = @import("pattern.zig");
 const Vm = @import("Vm.zig");
 const memo = @import("memo.zig");
 
@@ -89,10 +89,10 @@ pub fn main() !void {
         },
         .parse => {
             const generated = @import("../out.zig");
-            const rules = comptime generated.Rules(Pg, .{ .eval_branch_quota = 2000 });
+            const rules = comptime generated.Rules(pattern, .{ .eval_branch_quota = 2000 });
             const start = chopArg(&args) orelse
                 usage("missing argument: <?start>", .{});
-            var g = try Pg.Pattern.rulesToGrammar(alloc, rules, start);
+            var g = try pattern.Pattern.rulesToGrammar(alloc, rules, start);
             const prog = try g.compileAndOptimize(alloc);
             std.debug.print("prog.len={}\n", .{prog.items.len});
             // for (prog.items) |insn| {

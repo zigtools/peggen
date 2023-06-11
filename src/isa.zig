@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const ParserGenerator = @import("ParserGenerator.zig");
+const pattern = @import("pattern.zig");
 const input = @import("input.zig");
 
 pub const Program = std.ArrayListUnmanaged(Insn);
@@ -43,7 +43,7 @@ pub const Insn = union(enum) {
     fail,
     /// Set consumes the next byte of input if it is in the set of chars defined
     /// by Chars.
-    set: ParserGenerator.Charset,
+    set: pattern.Charset,
     /// Any consumes the next N bytes and fails if that is not possible.
     any: u8,
     /// PartialCommit modifies the backtrack entry on the top of the stack to
@@ -51,7 +51,7 @@ pub const Insn = union(enum) {
     partial_commit: Label,
     /// Span consumes zero or more bytes in the set Chars. This instruction
     /// never fails.
-    span: ParserGenerator.Charset,
+    span: pattern.Charset,
     /// BackCommit pops a backtrack entry off the stack, goes to the subject
     /// position in the entry, and jumps to Lbl.
     back_commit: Label,
@@ -135,7 +135,7 @@ pub const Insn = union(enum) {
             _ = try writer.write(@tagName(i));
         }
         switch (i) {
-            .set => |n| try writer.print("{}", .{ParserGenerator.CharsetFmt.init(n)}),
+            .set => |n| try writer.print("{}", .{pattern.CharsetFmt.init(n)}),
             .label => |n| try writer.print("l{}:", .{n.id}),
             .jump => |j| try writer.print(" l{}", .{j.id}),
             .choice => |n| try writer.print(" l{}", .{n.id}),
@@ -182,7 +182,7 @@ pub const ByteLabel = struct {
 };
 
 pub const CharsLabel = struct {
-    chars: ParserGenerator.Charset,
+    chars: pattern.Charset,
     lbl: Label,
 };
 
