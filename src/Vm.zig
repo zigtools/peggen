@@ -90,7 +90,7 @@ pub const StackEntry = struct {
 pub const Stack = struct {
     entries: std.ArrayListUnmanaged(StackEntry) = .{},
     capt: std.ArrayListUnmanaged(memo.Capture) = .{},
-    capt_arena: mem.Allocator,
+    cap_allocator: mem.Allocator,
 
     pub fn deinit(s: *Stack, allocator: mem.Allocator) void {
         for (s.entries.items) |*se| se.deinit(allocator);
@@ -99,9 +99,9 @@ pub const Stack = struct {
 
     pub fn addCapt(s: *Stack, capt: []const memo.Capture) !void {
         if (s.entries.items.len == 0) {
-            try s.capt.appendSlice(s.capt_arena, capt);
+            try s.capt.appendSlice(s.cap_allocator, capt);
         } else {
-            try s.entries.items[(s.entries.items.len) - 1].addCapt(s.capt_arena, capt);
+            try s.entries.items[(s.entries.items.len) - 1].addCapt(s.cap_allocator, capt);
         }
     }
 
@@ -118,23 +118,13 @@ pub const Stack = struct {
         }
     }
 
-    pub fn reset(
-        s: *Stack,
-    ) void {
-        s.capt.clearRetainingCapacity();
-        // need to complete remake the slice so that the underlying captures can be
-        // released to the garbage collector if the user has no references to them
-        // (unused stack entries shouldn't keep references to those captures).
-        s.entries.clearRetainingCapacity();
-    }
-
     pub fn push(s: *Stack, allocator: mem.Allocator, ent: StackEntry) !void {
         try s.entries.append(allocator, ent);
     }
 
     pub fn drop(s: *Stack, propagate: bool) !void {
         if (try s.pop(propagate)) |ent|
-            ent.deinit(s.capt_arena);
+            ent.deinit(s.cap_allocator);
     }
     // propagate marks whether captures should be propagated up the stack.
     pub fn pop(s: *Stack, propagate: bool) !?*StackEntry {
@@ -613,7 +603,7 @@ fn memoize(
     iv: ?Interval,
 ) !void {
     if (iv != null) {
-        if (mcapt) |capt| capt.clearRetainingCapacity();
+        if (mcapt) |capt| capt.clearAndFree(allocator);
     }
     const mexam = @max(src.furthest, src.pos()) - pos + 1;
     try memtbl.put(allocator, id, pos, mlen, mexam, count, if (mcapt) |c| c.* else .{});
@@ -627,13 +617,13 @@ pub fn exec(
     vm: *Vm,
     seekable_stream: anytype,
     memtbl: *memo.Table,
-    captures_arena: mem.Allocator,
+    cap_allocator: mem.Allocator,
 ) !ExecResult {
     // TODO improve memory strategy. i wasn't able to to prevent leaks
     // when captures were allocated with vm.allocator.  i added Stack.drop()
     // which fixed some leaks.  if we want to fix more, perhaps instances of
     // of Stack.pop() need to also be audited and the result deinit().
-    var st = Stack{ .capt_arena = captures_arena };
+    var st = Stack{ .cap_allocator = cap_allocator };
     defer st.deinit(vm.allocator);
 
     var src = try input.input(seekable_stream);
@@ -682,7 +672,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                     const b = decodeU8(idata.items[ip + 1 ..]);
                     // std.log.debug("char b={c} in={c}", .{ b, in });
                     if (b == in) {
-                        _ = try src.advance(1);
+                        src.advanceAssume(1);
                         ip += sz(.char);
                         break :blk;
                     }
@@ -710,6 +700,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
             },
             .ret => blk: {
                 if (try st.pop(true)) |ent| {
+                    defer ent.deinit(vm.allocator);
                     if (ent.type == .ret) {
                         ip = ent.ret;
                         break :blk;
@@ -725,7 +716,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                     const set = decodeSet(idata.items[ip + 1 ..], vm.sets.items);
                     // std.log.debug("set in='{c}' set.isSet(in)={} set={}", .{ in, set.isSet(in), pattern.CharsetFmt.init(set) });
                     if (set.isSet(in)) {
-                        _ = try src.advance(1);
+                        src.advanceAssume(1);
                         ip += sz(.set);
                         break :blk;
                     }
@@ -745,7 +736,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                     if (ent.type == .btrack) {
                         ent.btrack.off = src.pos();
                         try st.propCapt(vm.allocator);
-                        ent.capt.items.len = 0;
+                        ent.capt.clearAndFree(st.cap_allocator);
                         const lbl = decodeU24(idata.items[ip + 1 ..]);
                         ip = lbl;
                         break :blk;
@@ -758,12 +749,13 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 while (true) {
                     const in = src.peek() orelse break;
                     if (!set.isSet(in)) break;
-                    _ = try src.advance(1);
+                    src.advanceAssume(1);
                 }
                 ip += sz(.span);
             },
             .back_commit => blk: {
                 if (try st.pop(true)) |ent| {
+                    defer ent.deinit(vm.allocator);
                     if (ent.type == .btrack) {
                         std.debug.assert(try src.seekTo(ent.btrack.off));
                         const lbl = decodeU24(idata.items[ip + 1 ..]);
@@ -783,7 +775,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                     const b = decodeU8(idata.items[ip + 2 ..]);
                     if (in == b) {
                         try st.pushBacktrack(vm.allocator, StackBacktrack.init(lbl, src.pos()));
-                        _ = try src.advance(1);
+                        src.advanceAssume(1);
                         ip += sz(.test_char);
                         break :blk;
                     }
@@ -794,7 +786,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 if (src.peek()) |in| {
                     const b = decodeU8(idata.items[ip + 2 ..]);
                     if (in == b) {
-                        _ = try src.advance(1);
+                        src.advanceAssume(1);
                         ip += sz(.test_char_no_choice);
                         break :blk;
                     }
@@ -808,7 +800,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                     const set = decodeSet(idata.items[ip + 2 ..], vm.sets.items);
                     if (set.isSet(in)) {
                         try st.pushBacktrack(vm.allocator, StackBacktrack.init(lbl, src.pos()));
-                        _ = try src.advance(1);
+                        src.advanceAssume(1);
                         ip += sz(.test_set);
                         break :blk;
                     }
@@ -837,6 +829,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                         var buf: [0x100]u8 = undefined;
                         const n = func(checker.ptr, try src.slice(ent.memo.pos, src.pos(), &buf), src, id, flag);
                         if (n == -1) {
+                            ent.deinit(vm.allocator);
                             fail = true;
                         } else {
                             _ = try src.advance(@bitCast(usize, n));
@@ -916,6 +909,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                         ip += sz(.capture_end);
                         break :blk;
                     }
+                    ent.deinit(vm.allocator);
                 }
                 @panic("CaptureEnd did not find capture entry");
             },
@@ -967,7 +961,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                             } else {
                                 try st.addCapt(ent.capt.items);
                             }
-                        }
+                        } else ent.deinit(vm.allocator);
                     }
 
                     next.memo.count = accum + next.memo.count;
@@ -993,7 +987,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 const id = decodeI16(idata.items[ip + 2 ..]);
                 while (st.peek()) |p| {
                     if (p.type == .memo_tree and p.memo.id == id)
-                        try st.drop(true);
+                        _ = try st.pop(true);
                 }
                 ip += sz(.memo_tree_close);
             },
@@ -1014,17 +1008,17 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                         // std.log.debug("btrack={}", .{stack_entry.btrack});
                         ip = stack_entry.btrack.ip;
                         _ = try src.seekTo(stack_entry.btrack.off);
-                        stack_entry.capt.clearRetainingCapacity();
+                        stack_entry.capt.clearAndFree(vm.allocator);
                         break;
                     },
                     .memo => {
                         // Mark this position in the memoTable as a failed match
                         try memoize(vm.allocator, stack_entry.memo.id, stack_entry.memo.pos, -1, 0, null, src, memtbl, intrvl);
 
-                        stack_entry.capt.clearRetainingCapacity();
+                        stack_entry.capt.clearAndFree(vm.allocator);
                     },
                     .ret, .capt, .check => {
-                        stack_entry.capt.clearRetainingCapacity();
+                        stack_entry.capt.clearAndFree(vm.allocator);
                     },
                     else => {},
                 }

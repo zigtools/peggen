@@ -52,6 +52,7 @@ pub const Capture = struct {
     pub fn deinit(capt: *Capture, allocator: mem.Allocator) void {
         if (capt.ment) |e| e.deinit(allocator);
         for (capt.children.items) |*c| c.deinit(allocator);
+        capt.children.deinit(allocator);
     }
 
     pub fn initNode(id: usize, offset: usize, length: usize, children: List) Capture {
@@ -160,7 +161,7 @@ pub const Key = struct {
 // non-terminal parsed at a certain location. The table interface defines the
 // ApplyEdit function which is crucial for incremental parsing.
 pub const Table = union(enum) {
-    tree: *TreeTable,
+    tree: TreeTable,
     none,
     // Get returns the entry associated with the given position and ID. If
     // there are multiple entries with the same ID at that position, the
@@ -187,7 +188,7 @@ pub const Table = union(enum) {
     ) !void {
         switch (t.*) {
             .none => {},
-            .tree => |tt| try tt.put(allocator, id, start, length, examined, count, captures),
+            .tree => try t.tree.put(allocator, id, start, length, examined, count, captures),
         }
     }
 
@@ -197,7 +198,7 @@ pub const Table = union(enum) {
     pub fn applyEdit(t: *Table, allocator: mem.Allocator, edit: Edit) !void {
         switch (t.*) {
             .none => {},
-            .tree => |tt| try tt.applyEdit(allocator, edit),
+            .tree => try t.tree.applyEdit(allocator, edit),
         }
     }
 };

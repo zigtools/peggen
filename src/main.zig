@@ -100,11 +100,10 @@ pub fn main() !void {
             // }
 
             var vm = try Vm.encode(alloc, prog);
-            // var memotbl = memo.Table{ .none = {} };
-
-            var treetbl = memo.TreeTable{ .tree = .{ .root = null } };
-            var memotbl = memo.Table{ .tree = &treetbl };
-            const result = try vm.exec(file.seekableStream(), &memotbl);
+            var memotbl: memo.Table = .none;
+            // var memotbl = memo.Table{ .tree = .{ .tree = .{ .root = null } } };
+            var cap_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            const result = try vm.exec(file.seekableStream(), &memotbl, cap_arena.allocator());
             std.debug.print("errs: {any}\n", .{result[3].items});
         },
         .gen => {

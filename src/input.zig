@@ -61,6 +61,11 @@ pub fn Input(comptime R: type) type {
             return i.nchunk != 0;
         }
 
+        /// can be used in places where peek(n) has already happened
+        pub fn advanceAssume(i: *Self, n: usize) void {
+            _ = i.advance(n) catch unreachable;
+        }
+
         /// moves the offset forward by 'n' bytes. Returns true if the advance
         /// was successful (n chars were successfully skipped) and false otherwise. Note
         /// that even if Advance returns true the next call to Peek may return false if
