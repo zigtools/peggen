@@ -10,7 +10,9 @@ const Insn = isa.Insn;
 const Program = isa.Program;
 const optimize = @import("../optimize.zig");
 
-pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound, InvalidLiteral }!Program {
+pub const Error = error{ OutOfMemory, NotFound, InvalidLiteral, InvalidNot };
+
+pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
     std.log.debug("compile {s}", .{@tagName(p)});
     switch (p) {
         .grammar => |n| {
@@ -280,18 +282,15 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFoun
             code.appendAssumeCapacity(Insn.init(.label, l2));
             return code;
         },
-        // .not => |n| {
-        //     if (true) unreachable;
-        //     var sub = try n.get().compile(allocator);
-        //     defer sub.deinit(allocator);
-        //     const l1 = isa.Label.init();
-        //     var code = try isa.Program.initCapacity(allocator, sub.items.len + 3);
-        //     code.appendAssumeCapacity(Insn.init(.choice, l1));
-        //     code.appendSliceAssumeCapacity(sub.items);
-        //     code.appendAssumeCapacity(Insn.init(.fail_twice, {}));
-        //     code.appendAssumeCapacity(l1.toInsn());
-        //     return code;
-        // },
+        .not => |n| {
+            const subn = n.get();
+            if (subn.* == .class) {
+                return isa.programFrom(allocator, Insn.init(.set, subn.class));
+            } else {
+                std.log.err("expected Not() pattern to simplify into a character class. found .{s}", .{@tagName(subn.*)});
+                return error.InvalidNot;
+            }
+        },
         .cap => |n| {
             var sub = try n.patt.get().compile(allocator);
             defer sub.deinit(allocator);

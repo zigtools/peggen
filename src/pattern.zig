@@ -57,8 +57,10 @@ pub const CharsetFmt = struct {
         _ = fmt;
         var iter = setfmt.set.iterator(.{});
         _ = try writer.write("[");
-        while (iter.next()) |item|
-            try writer.print("{c}", .{@intCast(u8, item)});
+        while (iter.next()) |item| {
+            const c = @intCast(u8, item);
+            try writer.print("{}", .{std.fmt.Formatter(@import("PegParser.zig").formatEscapes){ .data = &.{c} }});
+        }
         _ = try writer.write("]");
     }
 };
@@ -84,7 +86,8 @@ pub const Pattern = union(enum) {
     negative: Ptr,
     /// the '&' predicate.
     positive: Ptr,
-    // not: Ptr,
+    /// used for negated classes such as [^a-z]
+    not: Ptr,
     /// marks a pattern to be captured with a certain ID.
     cap: PattId,
     no_cap: Ptr,
@@ -287,8 +290,9 @@ pub const Pattern = union(enum) {
     var _null: Pattern = .null;
     pub const null_ptr = &_null;
 
-    pub inline fn compile(p: Pattern, allocator: mem.Allocator) error{ OutOfMemory, NotFound, InvalidLiteral }!Program {
-        return @import("pattern/compile.zig").compile(p, allocator);
+    const pat_compile = @import("pattern/compile.zig");
+    pub inline fn compile(p: Pattern, allocator: mem.Allocator) pat_compile.Error!Program {
+        return pat_compile.compile(p, allocator);
     }
 
     pub fn compileAndOptimize(p: Pattern, allocator: mem.Allocator) !Program {
@@ -311,11 +315,11 @@ pub const Pattern = union(enum) {
             .star,
             .plus,
             .optional,
-            // .not,
             .negative,
             .positive,
             .no_cap,
             .search,
+            .not,
             => |n| try walk(n, followInline, Walker, walker),
             .cap, .memo => |n| try walk(n.patt, followInline, Walker, walker),
             .check => |n| try walk(n.patt, followInline, Walker, walker),
@@ -332,7 +336,15 @@ pub const Pattern = union(enum) {
                     try walk(n.inlined.?, followInline, Walker, walker);
                 }
             },
-            else => {},
+            .class,
+            .char_fn,
+            .literal,
+            .dot,
+            .empty_op,
+            .empty,
+            .null,
+            => {},
+            // => std.debug.panic("unexpected .{s}", .{@tagName(p.*)}),
         }
     }
 
@@ -389,13 +401,13 @@ pub const Pattern = union(enum) {
             .optional,
             .negative,
             .positive,
-            // .not,
             .no_cap,
             .search,
+            .not,
             => |n, tag| {
-                var nn = try allocator.create(Pattern);
-                nn.* = try n.normalize(allocator);
-                return @unionInit(Pattern, @tagName(tag), nn);
+                var tmp = p;
+                @field(tmp, @tagName(tag)).* = try n.normalize(allocator);
+                return tmp;
             },
             inline .repeat, .cap, .memo, .check, .escape => |n, tag| {
                 var tmp = p;
@@ -407,7 +419,19 @@ pub const Pattern = union(enum) {
                 tmp.err.recover.* = try n.recover.normalize(allocator);
                 return tmp;
             },
-            else => {},
+            .grammar => |n| {
+                _ = n;
+            },
+            .dot,
+            .char_fn,
+            .class,
+            .literal,
+            .non_term,
+            .empty,
+            => {},
+            .empty_op,
+            .null,
+            => std.debug.panic("unexpected .{s}", .{@tagName(p)}),
         }
         return p;
     }
@@ -427,7 +451,6 @@ pub const Pattern = union(enum) {
             .optional,
             .negative,
             .positive,
-            .not,
             .no_cap,
             .search,
             => |n| n.count(),
@@ -469,13 +492,10 @@ pub const Pattern = union(enum) {
             .optional,
             .negative,
             .positive,
-            // .not,
             .no_cap,
             .search,
-            => |n| {
-                n.deinit(allocator);
-                allocator.destroy(n);
-            },
+            .not,
+            => |n| n.deinit(allocator),
             .cap => |n| n.patt.deinit(allocator),
             .memo => |n| n.patt.deinit(allocator),
             .check => |n| n.patt.deinit(allocator),
@@ -655,11 +675,10 @@ pub inline fn Escape(pattern: Pattern, escapeFn: EscapeFn) Pattern {
     return .{ .escape = .{ .patt = &tmp, .escapeFn = escapeFn } };
 }
 
-// TODO implement. removed to avoid confusion w/ gpeg.Not vn Negative()
-// pub inline fn Not(pattern: Pattern) Pattern {
-//     var tmp = pattern;
-//     return .{ .not = &tmp };
-// }
+pub inline fn Not(pattern: Pattern) Pattern {
+    var tmp = pattern;
+    return .{ .not = &tmp };
+}
 
 pub inline fn Search(pattern: Pattern) Pattern {
     var tmp = pattern;

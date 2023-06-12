@@ -104,7 +104,7 @@ pub fn main() !void {
             // var memotbl = memo.Table{ .tree = .{ .tree = .{ .root = null } } };
             var cap_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             const result = try vm.exec(file.seekableStream(), &memotbl, cap_arena.allocator());
-            std.debug.print("errs: {any}\n", .{result[3].items});
+            std.debug.print("errs: {any} caps: {?any}\n", .{ result[3].items, result[2] });
         },
         .gen => {
             const outfilename = chopArg(&args) orelse

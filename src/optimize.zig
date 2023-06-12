@@ -77,6 +77,13 @@ pub fn get(p: Ptr) Ptr {
                 else => {},
             }
         },
+        .not => |n| switch (n.get().*) {
+            .class => {
+                p.* = .{ .class = p.not.class.complement() };
+                return p;
+            },
+            else => {},
+        },
         else => {},
     }
     return p;

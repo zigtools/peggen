@@ -451,7 +451,7 @@ pub const spacing = p.Ignore(p.ZeroOrMore(p.Select(&.{ space, comment })));
 /// fmt 'set' indicates square set escaping
 /// fmt '' indicates double-quoted escaping
 /// fmt "'" indicates single-quoted escaping
-fn formatEscapes(
+pub fn formatEscapes(
     bytes: []const u8,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,

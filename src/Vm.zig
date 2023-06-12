@@ -369,8 +369,7 @@ pub fn encode(allocator: mem.Allocator, insns: isa.Program) !Vm {
             .commit => |n| {
                 try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
-            .ret => {},
-            .fail => {},
+            .ret, .fail, .fail_twice => {},
             .set => |n| {
                 try args.append(encodeU8(try code.addSet(allocator, n)));
             },
@@ -386,7 +385,6 @@ pub fn encode(allocator: mem.Allocator, insns: isa.Program) !Vm {
             .back_commit => |n| {
                 try args.appendSlice(&encodeLabel(labels.get(n).?));
             },
-            .fail_twice => {},
             .empty => |n| {
                 try args.appendSlice(&.{n});
             },
@@ -660,6 +658,10 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
         const op = idata.items[ip];
         const insn = BaseInsn.from(op);
         std.log.debug("ip={} op={}/.{s}", .{ ip, op, @tagName(insn) });
+        // std.log.debug("stack.len={}", .{st.entries.items.len});
+        // for (st.entries.items) |e| {
+        //     std.log.debug("stack entry={}", .{e});
+        // }
         switch (insn) {
             .end => {
                 const fail_ = decodeU8(idata.items[ip + 1 ..]);
@@ -991,6 +993,37 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                 }
                 ip += sz(.memo_tree_close);
             },
+            .err => {
+                const errid = decodeU24(idata.items[ip + 1 ..]);
+                const msg = vm.errors.items[errid];
+                try errs.append(vm.allocator, .{
+                    .pos = src.pos(),
+                    .message = msg,
+                });
+                ip += sz(.err);
+            },
+            .test_any => {
+                const n = decodeU8(idata.items[ip + 2 ..]);
+                const lbl = decodeU24(idata.items[ip + 3 ..]);
+                const ent = StackBacktrack.init(lbl, src.pos());
+                if (try src.advance(n)) {
+                    try st.pushBacktrack(vm.allocator, ent);
+                    ip += sz(.test_any);
+                } else ip = lbl;
+            },
+            .test_set_no_choice => blk: {
+                const set = decodeSet(idata.items[ip + 2 ..], vm.sets.items);
+                if (src.peek()) |in| {
+                    if (set.isSet(in)) {
+                        _ = try src.advance(1);
+                        ip += sz(.test_set_no_choice);
+                        break :blk;
+                    }
+                }
+                const lbl = decodeU24(idata.items[ip + 3 ..]);
+                ip = lbl;
+            },
+
             else => std.debug.panic("Invalid opcode .{s}", .{@tagName(BaseInsn.from(op))}),
         }
 

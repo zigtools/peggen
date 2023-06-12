@@ -33,10 +33,9 @@ fn check(p_: Pattern, tests: []const PatternTest) !void {
             tt[1] != -1 and tt[1] != off)
         {
             std.debug.print(
-                "name='{s}' input='{s}' actual=({}, {}) expected=({})\n",
-                .{ name, tt[0], match, off, tt[1] },
+                "name='{s}' input='{s}' expected={} actual={}\n",
+                .{ name, tt[0], tt[1], off },
             );
-            std.debug.print("match={} off={} tt.match={}", .{ match, off, tt[1] });
             return error.UnexpectedResult;
         }
     }
@@ -151,6 +150,29 @@ test "Predicate" {
         };
         try check(p1, &tests);
         try check(p2, &tests);
+    }
+}
+
+test "Not" {
+    testing.log_level = .debug;
+    {
+        const p = pattern.OneOrMore(pattern.Not(pattern.CharRange('a', 'z')));
+        const tests = .{
+            .{ "ana", -1 },
+            .{ "12", 2 },
+            .{ "1a", 1 },
+        };
+        try check(p, &tests);
+    }
+    {
+        const p = pattern.OneOrMore(pattern.Not(pattern.Not(pattern.CharRange('a', 'z'))));
+        const tests = .{
+            .{ "ana", 3 },
+            .{ "12", -1 },
+            .{ "1a", -1 },
+            .{ "a1", 1 },
+        };
+        try check(p, &tests);
     }
 }
 
