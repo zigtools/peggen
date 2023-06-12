@@ -103,9 +103,9 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
         },
         .alt_slice, .seq_slice => unreachable,
         .seq => |n| {
-            var l = try n.left.get().compile(allocator);
+            var l = try n.left.get(allocator).compile(allocator);
             errdefer l.deinit(allocator);
-            var r = try n.right.get().compile(allocator);
+            var r = try n.right.get(allocator).compile(allocator);
             defer r.deinit(allocator);
             try l.appendSlice(allocator, r.items);
             return l;
@@ -118,14 +118,14 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
         .alt => |n| {
             // optimization: if Left and Right are charsets/single chars, return the union
             if (n.left.* != .empty and n.right.* != .empty) {
-                if (optimize.combine(n.left.get(), n.right.get())) |set| {
+                if (optimize.combine(n.left.get(allocator), n.right.get(allocator))) |set| {
                     return isa.programFrom(allocator, Insn.init(.set, set));
                 }
             }
 
-            var l = try n.left.get().compile(allocator);
+            var l = try n.left.get(allocator).compile(allocator);
             defer l.deinit(allocator);
-            var r = try n.right.get().compile(allocator);
+            var r = try n.right.get(allocator).compile(allocator);
             defer r.deinit(allocator);
 
             const l1 = isa.Label.init();
@@ -184,7 +184,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
                     // optimization: if the pattern we are repeating is a memoization
                     // entry, we should use special instructions to memoize it as a tree to
                     // get logarithmic saving when reparsing.
-                    var sub = try t.patt.get().compile(allocator);
+                    var sub = try t.patt.get(allocator).compile(allocator);
                     defer sub.deinit(allocator);
                     var code = try Program.initCapacity(allocator, sub.items.len + 11);
                     const l1 = isa.Label.init();
@@ -209,7 +209,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
                 },
                 else => {},
             }
-            var sub = try n.get().compile(allocator);
+            var sub = try n.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
             var code = try Program.initCapacity(allocator, sub.items.len + 4);
             var l1 = isa.Label.init();
@@ -222,10 +222,10 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             return code;
         },
         .plus => |n| {
-            const starp = Pattern{ .star = n.get() };
+            const starp = Pattern{ .star = n.get(allocator) };
             var star = try starp.compile(allocator);
             defer star.deinit(allocator);
-            var sub = try n.get().compile(allocator);
+            var sub = try n.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
 
             var code = try Program.initCapacity(allocator, sub.items.len + star.items.len);
@@ -234,7 +234,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             return code;
         },
         .optional => |n| {
-            switch (n.get().*) {
+            switch (n.get(allocator).*) {
                 .literal => |s| if (s.len == 1) {
                     const l1 = isa.Label.init();
                     return isa.programFromSlice(allocator, &.{
@@ -252,13 +252,13 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
                 else => {},
             }
             const a = Pattern{ .alt = .{
-                .left = n.get(),
+                .left = n.get(allocator),
                 .right = Pattern.null_ptr,
             } };
             return a.compile(allocator);
         },
         .negative => |n| {
-            var sub = try n.get().compile(allocator);
+            var sub = try n.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
             const l1 = isa.Label.init();
             var code = try isa.Program.initCapacity(allocator, sub.items.len + 3);
@@ -269,7 +269,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             return code;
         },
         .positive => |n| {
-            var sub = try n.get().compile(allocator);
+            var sub = try n.get(allocator).compile(allocator);
             var code = try isa.Program.initCapacity(allocator, sub.items.len + 5);
             defer sub.deinit(allocator);
             const l1 = isa.Label.init();
@@ -283,7 +283,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             return code;
         },
         .not => |n| {
-            const subn = n.get();
+            const subn = n.get(allocator);
             if (subn.* == .class) {
                 return isa.programFrom(allocator, Insn.init(.set, subn.class));
             } else {
@@ -292,7 +292,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             }
         },
         .cap => |n| {
-            var sub = try n.patt.get().compile(allocator);
+            var sub = try n.patt.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
             var code = try Program.initCapacity(allocator, sub.items.len + 2);
 
@@ -337,7 +337,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
         },
         .check => |n| {
             const L1 = isa.Label.init();
-            var sub = try n.patt.get().compile(allocator);
+            var sub = try n.patt.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
             var code = try Program.initCapacity(allocator, sub.items.len + 3);
             code.appendAssumeCapacity(Insn.init(.check_begin, .{
@@ -353,7 +353,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
             var set: Charset = undefined;
             var opt = false;
 
-            var sub = try n.get().compile(allocator);
+            var sub = try n.get(allocator).compile(allocator);
             defer sub.deinit(allocator);
 
             if (optimize.nextInsn(sub.items)) |next| {
@@ -387,7 +387,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
                 pattern.NonTerm("S");
 
             const patt = pattern.SelectBuf(2, &.{
-                n.get().*,
+                n.get(allocator).*,
                 pattern.GroupBuf(2, &.{ pattern.Any(1), rsearch }),
             });
             var g = try Pattern.rulesToGrammar(allocator, &.{.{ "S", patt }}, "S");

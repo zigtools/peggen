@@ -154,7 +154,6 @@ test "Predicate" {
 }
 
 test "Not" {
-    testing.log_level = .debug;
     {
         const p = pattern.OneOrMore(pattern.Not(pattern.CharRange('a', 'z')));
         const tests = .{

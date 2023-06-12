@@ -4,20 +4,20 @@ const pattern = @import("pattern.zig");
 const Ptr = pattern.Pattern.Ptr;
 const isa = @import("isa.zig");
 
-pub fn get(p: Ptr) Ptr {
+pub fn get(p: Ptr, allocator: mem.Allocator) Ptr {
     switch (p.*) {
         .non_term => |n| {
             if (n.inlined) |x| return x;
         },
         .alt_slice, .seq_slice => unreachable,
         .alt => |t| {
-            const l = t.left.get();
-            const r = t.right.get();
+            const l = t.left.get(allocator);
+            const r = t.right.get(allocator);
             if (l.* == .empty) return l;
 
             if (r.* == .empty) {
                 r.* = .{ .optional = l };
-                return r.get();
+                return r.get(allocator);
             }
 
             // Combine the left and right sides of an alternation into a class node
@@ -34,8 +34,8 @@ pub fn get(p: Ptr) Ptr {
         },
         .seq => |t| {
             // optimize use of empty: `a ""` and `"" a` are just `a`.
-            const l = t.left.get();
-            const r = t.right.get();
+            const l = t.left.get(allocator);
+            const r = t.right.get(allocator);
             if (r.* == .empty) return l;
             if (l.* == .empty) return r;
 
@@ -48,7 +48,7 @@ pub fn get(p: Ptr) Ptr {
                 return p;
 
             var set: pattern.Charset = undefined;
-            switch (nn.get().*) {
+            switch (nn.get(allocator).*) {
                 .literal => |str| {
                     if (str.len != 1) return p;
                     set = pattern.Charset.initEmpty();
@@ -77,9 +77,11 @@ pub fn get(p: Ptr) Ptr {
                 else => {},
             }
         },
-        .not => |n| switch (n.get().*) {
-            .class => {
-                p.* = .{ .class = p.not.class.complement() };
+        .not => |n| switch (n.get(allocator).*) {
+            .class => |class| {
+                n.deinit(allocator);
+                allocator.destroy(n);
+                p.* = .{ .class = class.complement() };
                 return p;
             },
             else => {},

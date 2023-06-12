@@ -283,8 +283,8 @@ pub const Pattern = union(enum) {
         }
     }
 
-    pub fn get(p: Ptr) Ptr {
-        return optimize.get(p);
+    pub fn get(p: Ptr, allocator: mem.Allocator) Ptr {
+        return optimize.get(p, allocator);
     }
 
     var _null: Pattern = .null;
@@ -405,9 +405,9 @@ pub const Pattern = union(enum) {
             .search,
             .not,
             => |n, tag| {
-                var tmp = p;
-                @field(tmp, @tagName(tag)).* = try n.normalize(allocator);
-                return tmp;
+                var sub = try allocator.create(Pattern);
+                sub.* = try n.normalize(allocator);
+                return @unionInit(Pattern, @tagName(tag), sub);
             },
             inline .repeat, .cap, .memo, .check, .escape => |n, tag| {
                 var tmp = p;
@@ -495,7 +495,10 @@ pub const Pattern = union(enum) {
             .no_cap,
             .search,
             .not,
-            => |n| n.deinit(allocator),
+            => |n| {
+                n.deinit(allocator);
+                allocator.destroy(n);
+            },
             .cap => |n| n.patt.deinit(allocator),
             .memo => |n| n.patt.deinit(allocator),
             .check => |n| n.patt.deinit(allocator),
