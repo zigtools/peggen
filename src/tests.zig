@@ -3,4 +3,5 @@ test {
     _ = @import("pattern.zig");
     _ = @import("tests/gpeg.zig");
     _ = @import("tests/capture.zig");
+    _ = @import("tests/interval.zig");
 }

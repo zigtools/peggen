@@ -2,11 +2,13 @@ const std = @import("std");
 const mem = std.mem;
 const pattern = @import("pattern.zig");
 const Vm = @This();
-const memo = @import("memo.zig");
+const memotree = @import("memo/tree.zig");
+const Capture = memotree.Capture;
+const Table = memotree.Table;
 const input = @import("input.zig");
 const isa = @import("isa.zig");
-const tree = @import("tree.zig");
-const Interval = memo.Interval;
+const tree = @import("memo/interval/lazy/tree.zig");
+const Interval = tree.Interval;
 
 /// list of charsets
 sets: std.ArrayListUnmanaged(pattern.Charset) = .{},
@@ -40,7 +42,7 @@ pub const ParseError = struct {
 const ExecResult = struct {
     bool,
     usize,
-    ?memo.Capture,
+    ?Capture,
     ParseError.List,
 };
 
@@ -66,7 +68,7 @@ pub const StackEntry = struct {
     ret: usize = 0, // stackRet is reused for .check
     btrack: StackBacktrack,
     memo: StackMemo = .{}, // stackMemo is reused for .capt
-    capt: std.ArrayListUnmanaged(memo.Capture) = .{},
+    capt: std.ArrayListUnmanaged(Capture) = .{},
 
     pub const Type = enum(u8) {
         ret,
@@ -82,14 +84,14 @@ pub const StackEntry = struct {
         se.capt.deinit(allocator);
     }
 
-    pub fn addCapt(se: *StackEntry, allocator: mem.Allocator, capt: []const memo.Capture) !void {
+    pub fn addCapt(se: *StackEntry, allocator: mem.Allocator, capt: []const Capture) !void {
         try se.capt.appendSlice(allocator, capt);
     }
 };
 
 pub const Stack = struct {
     entries: std.ArrayListUnmanaged(StackEntry) = .{},
-    capt: std.ArrayListUnmanaged(memo.Capture) = .{},
+    capt: std.ArrayListUnmanaged(Capture) = .{},
     cap_allocator: mem.Allocator,
 
     pub fn deinit(s: *Stack, allocator: mem.Allocator) void {
@@ -97,7 +99,7 @@ pub const Stack = struct {
         s.entries.deinit(allocator);
     }
 
-    pub fn addCapt(s: *Stack, capt: []const memo.Capture) !void {
+    pub fn addCapt(s: *Stack, capt: []const Capture) !void {
         if (s.entries.items.len == 0) {
             try s.capt.appendSlice(s.cap_allocator, capt);
         } else {
@@ -595,9 +597,9 @@ fn memoize(
     pos: usize,
     mlen: isize,
     count: usize,
-    mcapt: ?*memo.Capture.List,
+    mcapt: ?*Capture.List,
     src: anytype,
-    memtbl: *memo.Table,
+    memtbl: *Table,
     iv: ?Interval,
 ) !void {
     if (iv != null) {
@@ -614,7 +616,7 @@ fn memoize(
 pub fn exec(
     vm: *Vm,
     seekable_stream: anytype,
-    memtbl: *memo.Table,
+    memtbl: *Table,
     cap_allocator: mem.Allocator,
 ) !ExecResult {
     // TODO improve memory strategy. i wasn't able to to prevent leaks
@@ -629,11 +631,11 @@ pub fn exec(
     return vm.execImpl(0, &st, &src, memtbl, null);
 }
 
-fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, intrvl: ?Interval) !ExecResult {
+fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrvl: ?Interval) !ExecResult {
     const idata = vm.insns;
     var ip = ip_;
     if (ip >= idata.items.len) {
-        return .{ true, 0, memo.Capture.initDummy(0, 0, .{}), .{} };
+        return .{ true, 0, Capture.initDummy(0, 0, .{}), .{} };
     }
 
     var caprange: ?Interval = null;
@@ -889,7 +891,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                         .low = @min(tmp.low, pos - back),
                         .high = @max(tmp.high, pos),
                     };
-                    const capt = memo.Capture.initNode(id, pos - back, back, .{});
+                    const capt = Capture.initNode(id, pos - back, back, .{});
                     try st.addCapt(&.{capt});
                 }
 
@@ -905,7 +907,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                                 .low = @min(tmp.low, ent.memo.pos),
                                 .high = @max(tmp.high, end),
                             };
-                            const capt = memo.Capture.initNode(ent.memo.id, ent.memo.pos, end - ent.memo.pos, ent.capt);
+                            const capt = Capture.initNode(ent.memo.id, ent.memo.pos, end - ent.memo.pos, ent.capt);
                             try st.addCapt(&.{capt});
                         }
                         ip += sz(.capture_end);
@@ -958,7 +960,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
                         // next is now top of stack
                         if (ent.capt.items.len > 0) {
                             if (intrvl == null) {
-                                const dummy = memo.Capture.initDummy(ent.memo.pos, src.pos() - ent.memo.pos, ent.capt);
+                                const dummy = Capture.initDummy(ent.memo.pos, src.pos() - ent.memo.pos, ent.capt);
                                 try st.addCapt(&.{dummy});
                             } else {
                                 try st.addCapt(ent.capt.items);
@@ -1060,9 +1062,9 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *memo.Table, 
     }
     if (intrvl != null) {
         const caprg = caprange orelse unreachable;
-        return .{ success, src.pos(), memo.Capture.initDummy(caprg.low, caprg.high - caprg.low, st.capt), errs };
+        return .{ success, src.pos(), Capture.initDummy(caprg.low, caprg.high - caprg.low, st.capt), errs };
     }
-    return .{ success, src.pos(), memo.Capture.initDummy(0, src.pos(), st.capt), errs };
+    return .{ success, src.pos(), Capture.initDummy(0, src.pos(), st.capt), errs };
 }
 
 fn decodeU8(b: []const u8) u8 {

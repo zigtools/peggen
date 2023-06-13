@@ -1,7 +1,7 @@
 const std = @import("std");
 const p = @import("../pattern.zig");
 const Vm = @import("../Vm.zig");
-const memo = @import("../memo.zig");
+const memo = @import("../memo/tree.zig");
 
 const testing = std.testing;
 const talloc = testing.allocator;

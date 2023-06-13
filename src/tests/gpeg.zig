@@ -2,7 +2,7 @@ const std = @import("std");
 const pattern = @import("../pattern.zig");
 const Pattern = pattern.Pattern;
 const Vm = @import("../Vm.zig");
-const memo = @import("../memo.zig");
+const memo = @import("../memo/tree.zig");
 const isa = @import("../isa.zig");
 const input = @import("../input.zig");
 

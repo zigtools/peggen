@@ -5,7 +5,7 @@ const Grammar = PegParser.Grammar;
 const Expression = PegParser.Expression;
 const pattern = @import("pattern.zig");
 const Vm = @import("Vm.zig");
-const memo = @import("memo.zig");
+const memotree = @import("memo/tree.zig");
 
 pub fn generate(result: Grammar, writer: anytype) !void {
     _ = try writer.write(
@@ -100,7 +100,7 @@ pub fn main() !void {
             // }
 
             var vm = try Vm.encode(alloc, prog);
-            var memotbl: memo.Table = .none;
+            var memotbl: memotree.Table = .none;
             // var memotbl = memo.Table{ .tree = .{ .tree = .{ .root = null } } };
             var cap_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             const result = try vm.exec(file.seekableStream(), &memotbl, cap_arena.allocator());
