@@ -29,7 +29,7 @@ pub fn deinit(vm: *Vm) void {
 
 pub const ParseError = struct {
     message: []const u8,
-    pos: usize,
+    pos: isize,
 
     pub const List = std.ArrayListUnmanaged(ParseError);
     pub fn format(e: ParseError, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -41,22 +41,22 @@ pub const ParseError = struct {
 
 const ExecResult = struct {
     bool,
-    usize,
+    isize,
     ?Capture,
     ParseError.List,
 };
 
 pub const StackBacktrack = struct {
     ip: usize,
-    off: usize,
-    pub fn init(ip: usize, off: usize) StackBacktrack {
+    off: isize,
+    pub fn init(ip: usize, off: isize) StackBacktrack {
         return .{ .ip = ip, .off = off };
     }
 };
 
 pub const StackMemo = struct {
     id: u16 = 0,
-    pos: usize = 0,
+    pos: isize = 0,
     count: usize = 0,
 };
 
@@ -594,7 +594,7 @@ pub const insn_sizes = std.enums.directEnumArray(BaseInsn, u8, 0, .{
 fn memoize(
     allocator: mem.Allocator,
     id: usize,
-    pos: usize,
+    pos: isize,
     mlen: isize,
     count: usize,
     mcapt: ?*Capture.List,
@@ -605,7 +605,7 @@ fn memoize(
     if (iv != null) {
         if (mcapt) |capt| capt.clearAndFree(allocator);
     }
-    const mexam = @max(src.furthest, src.pos()) - pos + 1;
+    const mexam = @max(@intCast(isize, src.furthest), src.pos()) - pos + 1;
     try memtbl.put(allocator, id, pos, mlen, mexam, count, if (mcapt) |c| c.* else .{});
 }
 
@@ -761,7 +761,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                 if (try st.pop(true)) |ent| {
                     defer ent.deinit(vm.allocator);
                     if (ent.type == .btrack) {
-                        std.debug.assert(try src.seekTo(ent.btrack.off));
+                        std.debug.assert(try src.seekTo(@intCast(usize, ent.btrack.off)));
                         const lbl = decodeU24(idata.items[ip + 1 ..]);
                         ip = lbl;
                         break :blk;
@@ -817,7 +817,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                 try st.pushCheck(vm.allocator, .{
                     .id = @intCast(u16, id),
                     .count = @intCast(u16, flag),
-                    .pos = src.pos(),
+                    .pos = @intCast(isize, src.pos()),
                 });
                 ip += sz(.check_begin);
             },
@@ -836,7 +836,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                             ent.deinit(vm.allocator);
                             fail = true;
                         } else {
-                            _ = try src.advance(@bitCast(usize, n));
+                            _ = try src.advance(n);
                         }
 
                         ip += sz(.check_end);
@@ -860,7 +860,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                     });
 
                     try st.addCapt(ment.captures.items);
-                    _ = try src.advance(@intCast(usize, ment.length));
+                    _ = try src.advance(ment.length);
                     _ = src.peek();
                     ip = lbl;
                 } else {
@@ -872,7 +872,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                 }
             },
             .capture_late => {
-                const back = decodeU8(idata.items[ip + 1 ..]);
+                const back = decodeI8(idata.items[ip + 1 ..]);
                 const id = decodeU16(idata.items[ip + 2 ..]);
                 try st.pushCapt(vm.allocator, .{
                     .id = id,
@@ -926,7 +926,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                             vm.allocator,
                             ent.memo.id,
                             ent.memo.pos,
-                            @intCast(isize, mlen),
+                            mlen,
                             ent.memo.count,
                             &ent.capt,
                             src,
@@ -974,7 +974,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                         vm.allocator,
                         next.memo.id,
                         next.memo.pos,
-                        @intCast(isize, mlen),
+                        mlen,
                         next.memo.count,
                         &next.capt,
                         src,
@@ -1042,7 +1042,7 @@ fn execImpl(vm: *Vm, ip_: usize, st: *Stack, src: anytype, memtbl: *Table, intrv
                     .btrack => {
                         // std.log.debug("btrack={}", .{stack_entry.btrack});
                         ip = stack_entry.btrack.ip;
-                        _ = try src.seekTo(stack_entry.btrack.off);
+                        _ = try src.seekTo(@intCast(usize, stack_entry.btrack.off));
                         stack_entry.capt.clearAndFree(vm.allocator);
                         break;
                     },
@@ -1094,7 +1094,7 @@ fn decodeSet(b: []const u8, sets: []const pattern.Charset) pattern.Charset {
     return sets[i];
 }
 
-fn overlaps(i_: ?Interval, low2: usize, high2: usize) bool {
+fn overlaps(i_: ?Interval, low2: isize, high2: isize) bool {
     const i = i_ orelse return true;
     return i.low < high2 and i.high > low2;
 }

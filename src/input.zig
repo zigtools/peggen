@@ -30,8 +30,8 @@ pub fn Input(comptime R: type) type {
             // std.debug.print("input.refill() i.nchunk={}, i.base={}, i.coff={}, i.furthest={}\n", .{ i.nchunk, i.base, i.coff, i.furthest });
         }
 
-        pub fn pos(i: Self) usize {
-            return i.base + i.coff;
+        pub fn pos(i: Self) isize {
+            return @intCast(isize, i.base + i.coff);
         }
 
         /// returns the next byte in the stream or 'false' if there are no more
@@ -61,8 +61,9 @@ pub fn Input(comptime R: type) type {
             return i.nchunk != 0;
         }
 
-        /// can be used in places where peek(n) has already happened
-        pub fn advanceAssume(i: *Self, n: usize) void {
+        /// assumes peek(n) has already happened. can be used in place of
+        /// advance(n) when peek(n) has already happened.
+        pub fn advanceAssume(i: *Self, n: isize) void {
             _ = i.advance(n) catch unreachable;
         }
 
@@ -70,10 +71,10 @@ pub fn Input(comptime R: type) type {
         /// was successful (n chars were successfully skipped) and false otherwise. Note
         /// that even if Advance returns true the next call to Peek may return false if
         /// the advance went to the exact end of the data.
-        pub fn advance(i: *Self, n: usize) !bool {
+        pub fn advance(i: *Self, n: isize) !bool {
             if (i.nchunk == 0) return false;
 
-            i.coff += n;
+            i.coff += @intCast(usize, n);
             if (i.coff > i.nchunk) {
                 try i.refill(i.base + i.coff);
                 return false;
@@ -83,15 +84,15 @@ pub fn Input(comptime R: type) type {
             return true;
         }
 
-        pub fn readAt(i: *Self, buf: []u8, pos_: usize) !usize {
-            try i.r.seekTo(pos_);
+        pub fn readAt(i: *Self, buf: []u8, pos_: isize) !usize {
+            try i.r.seekTo(@intCast(u64, pos_));
             return i.r.context.read(buf);
         }
 
         /// returns a slice of the reader corresponding to the range [low:high).
-        pub fn slice(i: *Self, low: usize, high: usize, buf: []u8) ![]const u8 {
+        pub fn slice(i: *Self, low: isize, high: isize, buf: []u8) ![]const u8 {
             if (buf.len < high - low) return error.OutOfMemory;
-            const n = try i.readAt(buf[0 .. high - low], low);
+            const n = try i.readAt(buf[0..@intCast(usize, high - low)], low);
             return buf[0..n];
         }
     };

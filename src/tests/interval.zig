@@ -7,9 +7,9 @@ const Tree = lazylogtree.Tree;
 var prng = std.rand.DefaultPrng.init(0);
 const rand = prng.random();
 
-fn randrange(max: usize) [2]usize {
-    const low = rand.intRangeAtMost(usize, 0, max);
-    const high = low + rand.intRangeAtMost(usize, 0, 1000);
+fn randrange(max: isize) [2]isize {
+    const low = rand.intRangeAtMost(isize, 0, max);
+    const high = low + rand.intRangeAtMost(isize, 0, 1000);
     return if (low == high)
         .{ low, low + 1 }
     else
@@ -34,19 +34,20 @@ pub fn main() !void {
     const alloc = arena.allocator();
     // const alloc = std.heap.c_allocator;
     // const alloc = t.allocator;
-    var it = try Tree.init(alloc);
+    var it = Tree{};
     defer it.deinit(alloc);
     var ia = Array{};
     defer ia.deinit(alloc);
-    const nops = 3000;
+    const nops = 300000;
     const maxidx = 10;
     const maxid = 10;
     const maxshamt = 50;
 
     var pt: lazytree.Value = .none;
     var pa: lazytree.Value = .none;
-    var length: usize = 0;
+    var length: isize = 0;
     var haspt: bool = false;
+    t.log_level = .debug;
 
     for (0..nops) |i| {
         const op = rand.enumValue(Op);
@@ -56,26 +57,25 @@ pub fn main() !void {
                 const lowhigh = randrange(maxidx);
                 const low = lowhigh[0];
                 const high = lowhigh[1];
-                std.log.debug("=== op={s} {}:[{},{}]", .{ @tagName(op), id, low, high });
+                std.log.debug("=== {} op={s} {}:[{},{}]", .{ i, @tagName(op), id, low, high });
 
                 pt = try it.add(alloc, id, low, high, lazytree.Value.init((lazytree.IValue{ .value = i })));
-
                 pa = try ia.add(alloc, id, low, high, i);
                 length = high - low;
                 haspt = true;
             },
             .find => {
                 const id = rand.intRangeAtMost(usize, 0, maxid);
-                const pos = rand.intRangeAtMost(usize, 0, maxidx);
-                std.log.debug("=== op={s} {}:{}", .{ @tagName(op), id, pos });
+                const pos = rand.intRangeAtMost(isize, 0, maxidx);
+                std.log.debug("=== {} op={s} {}:{}", .{ i, @tagName(op), id, pos });
 
                 const vt = try it.findLargest(alloc, id, pos);
                 const va = ia.findLargest(id, pos);
-                std.log.debug("vt={?} va={?}", .{ vt, va });
 
                 if (vt == null and va == null)
-                    continue
-                else if ((vt == null) != (va == null)) {
+                    continue;
+                std.log.info("i={} vt={?} va={?}", .{ i, vt, va });
+                if ((vt == null) != (va == null)) {
                     std.log.err("Find1 ({}, {}): {?} != {?}", .{ id, pos, vt, va });
                     return error.TestUnexpectedResult;
                 }
@@ -86,26 +86,28 @@ pub fn main() !void {
             },
             .remove_and_shift => {
                 const lowhigh = randrange(maxidx);
-                const amt = randint(maxshamt, maxshamt * 2);
+                const amt = randint(-maxshamt, maxshamt);
                 const low = lowhigh[0];
                 const high = lowhigh[1];
 
                 if (haspt) {
-                    const ptpos = try pt.pos(alloc);
+                    const ptpos = pt.pos();
                     if ((lazytree.Interval{ .low = low, .high = high })
                         .overlaps(ptpos, ptpos + length))
                     {
                         haspt = false;
                     }
                 }
-                std.log.debug("=== op={s} {}:[{},{}]", .{ @tagName(op), amt, low, high });
+                std.log.debug("=== {} op={s} {}:[{},{}]", .{ i, @tagName(op), amt, low, high });
                 try it.removeAndShift(alloc, low, high, amt);
                 ia.removeAndShift(low, high, amt);
             },
             .pos => {
-                std.log.debug("=== op={s}", .{@tagName(op)});
-                if (haspt and try pt.pos(alloc) != try pa.pos(alloc)) {
-                    std.log.err("{} != {}", .{ try pt.pos(alloc), try pa.pos(alloc) });
+                std.log.debug("=== {} op={s}", .{ i, @tagName(op) });
+                const post = pt.pos();
+                const posa = pa.pos();
+                if (haspt and post != posa) {
+                    std.log.err("i={} {} != {}", .{ i, post, posa });
                     return error.TestUnexpectedResult;
                 }
             },

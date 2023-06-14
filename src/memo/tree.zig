@@ -10,9 +10,9 @@ const Node = lazylogtree.Node;
 /// [Start, End) is modified to be Len bytes. If Len = 0, this is equivalent
 /// to deleting the interval, and if Start = End this is an insertion.
 pub const Edit = struct {
-    start: usize,
-    end: usize,
-    len: usize,
+    start: isize,
+    end: isize,
+    len: isize,
 };
 
 // An Entry represents a memoized parse result. It stores the non-terminal
@@ -22,18 +22,18 @@ pub const Edit = struct {
 // examined a non-zero number of characters).
 pub const Entry = struct {
     length: isize,
-    examined: usize,
+    examined: isize,
     count: usize,
     captures: Capture.List = .{},
-    pos: usize,
+    pos: isize,
 
     pub fn deinit(e: *Entry, allocator: mem.Allocator) void {
         for (e.captures.items) |*capt| capt.deinit(allocator);
         e.captures.deinit(allocator);
     }
 
-    fn setPos(e: *Entry, allocator: mem.Allocator, pos: Value) !void {
-        e.pos = try pos.pos(allocator);
+    fn setPos(e: *Entry, pos: Value) void {
+        e.pos = pos.pos();
         for (e.captures.items) |*cap|
             cap.setMEnt(e);
     }
@@ -42,8 +42,8 @@ pub const Entry = struct {
 pub const Capture = struct {
     id: u32,
     type: Type,
-    off: usize,
-    length: usize,
+    off: isize,
+    length: isize,
     ment: ?*Entry = null,
     children: List = .{},
 
@@ -56,7 +56,7 @@ pub const Capture = struct {
         capt.children.deinit(allocator);
     }
 
-    pub fn initNode(id: usize, offset: usize, length: usize, children: List) Capture {
+    pub fn initNode(id: usize, offset: isize, length: isize, children: List) Capture {
         return Capture{
             .id = @intCast(u32, id),
             .type = .node,
@@ -66,7 +66,7 @@ pub const Capture = struct {
         };
     }
 
-    pub fn initDummy(offset: usize, length: usize, children: List) Capture {
+    pub fn initDummy(offset: isize, length: isize, children: List) Capture {
         return .{
             .id = 0,
             .type = .dummy,
@@ -132,7 +132,7 @@ pub const Capture = struct {
         return .{ .capt = capt, .buf = buf };
     }
 
-    pub fn start(c: Capture) usize {
+    pub fn start(c: Capture) isize {
         if (c.ment) |ent| {
             return ent.pos + c.off;
         }
@@ -167,7 +167,7 @@ pub const Table = union(enum) {
     // Get returns the entry associated with the given position and ID. If
     // there are multiple entries with the same ID at that position, the
     // largest entry is returned (determined by matched length).
-    pub fn get(t: Table, id: usize, pos: usize) ?*Entry {
+    pub fn get(t: Table, id: usize, pos: isize) ?*Entry {
         _ = pos;
         _ = id;
         switch (t) {
@@ -181,9 +181,9 @@ pub const Table = union(enum) {
         t: *Table,
         allocator: mem.Allocator,
         id: usize,
-        start: usize,
+        start: isize,
         length: isize,
-        examined: usize,
+        examined: isize,
         count: usize,
         captures: Capture.List,
     ) !void {
@@ -226,19 +226,19 @@ pub const TreeTable = struct {
         t: *TreeTable,
         allocator: mem.Allocator,
         id: usize,
-        start: usize,
+        start: isize,
         length: isize,
-        examined_: usize,
+        examined_: isize,
         count: usize,
         capt: Capture.List,
     ) !void {
         if (examined_ < t.threshold or length == 0)
             return;
 
-        const examined = @max(examined_, @intCast(usize, length));
+        const examined = @max(examined_, length);
 
-        var e = try allocator.create(Entry);
-        e.* = .{
+        var entry = try allocator.create(Entry);
+        entry.* = .{
             .length = length,
             .examined = examined,
             .count = count,
@@ -246,14 +246,15 @@ pub const TreeTable = struct {
             .pos = 0,
         };
         t.lock.lock();
-        try e.setPos(allocator, try t.add(allocator, id, start, start + examined, e));
+        const pos = try t.add(allocator, id, start, start + examined, entry);
+        entry.setPos(pos);
         t.lock.unlock();
     }
 
     // Adds the given interval to the tree. An id should also be given to the
     // interval to uniquely identify it if any other intervals begin at the same
     // location.
-    pub fn add(t: *TreeTable, allocator: mem.Allocator, id: usize, low: usize, high: usize, value: *Entry) !Value {
+    pub fn add(t: *TreeTable, allocator: mem.Allocator, id: usize, low: isize, high: isize, value: *Entry) !Value {
         const node_loc = try Node.add(
             t.tree.root,
             allocator,

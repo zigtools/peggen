@@ -5,25 +5,25 @@ const LazyInterval = lazylogtree.LazyInterval;
 const memotree = @import("../../tree.zig");
 
 pub const Interval = struct {
-    low: usize,
-    high: usize,
+    low: isize,
+    high: isize,
 
-    pub fn init(low: usize, high: usize) Interval {
+    pub fn init(low: isize, high: isize) Interval {
         return .{ .low = low, .high = high };
     }
 
-    pub fn overlaps(i: Interval, low: usize, high: usize) bool {
+    pub fn overlaps(i: Interval, low: isize, high: isize) bool {
         return i.low < high and i.high > low;
     }
 
     pub fn shift(i: Interval, amt: isize) Interval {
         return Interval{
-            .low = @intCast(usize, @bitCast(isize, i.low) + amt),
-            .high = @intCast(usize, @bitCast(isize, i.high) + amt),
+            .low = i.low + amt,
+            .high = i.high + amt,
         };
     }
 
-    pub fn len(i: Interval) usize {
+    pub fn len(i: Interval) isize {
         return i.high - i.low;
     }
 };
@@ -57,8 +57,7 @@ pub const Value = union(enum) {
         };
     }
 
-    pub fn pos(p: @This(), allocator: mem.Allocator) !usize {
-        _ = allocator;
+    pub fn pos(p: Value) isize {
         switch (p) {
             .ivalue => |iv| return iv.interval.low,
             // .ivalues => |iv| {

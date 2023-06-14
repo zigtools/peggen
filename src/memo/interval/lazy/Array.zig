@@ -23,8 +23,8 @@ pub fn pos(iv: IValue) usize {
     return iv.interval.Low;
 }
 
-pub fn findLargest(a: Array, id: usize, pos_: usize) ?IValue {
-    var max: usize = 0;
+pub fn findLargest(a: Array, id: usize, pos_: isize) ?IValue {
+    var max: isize = 0;
     var maxi: isize = -1;
     for (a.slots.items, 0..) |in, i| {
         if (in.ivalue.interval.low == pos_ and in.id == id and in.ivalue.interval.high > max) {
@@ -39,7 +39,7 @@ pub fn findLargest(a: Array, id: usize, pos_: usize) ?IValue {
     return a.slots.items[@bitCast(usize, maxi)].ivalue;
 }
 
-pub fn add(a: *Array, allocator: mem.Allocator, id: usize, low: usize, high: usize, val: usize) !tree.Value {
+pub fn add(a: *Array, allocator: mem.Allocator, id: usize, low: isize, high: isize, val: usize) !tree.Value {
     const iv = IValue{
         .interval = Interval.init(low, high),
         .value = val,
@@ -51,7 +51,7 @@ pub fn add(a: *Array, allocator: mem.Allocator, id: usize, low: usize, high: usi
     return tree.Value.init(iv);
 }
 
-pub fn removeAndShift(a: *Array, low: usize, high: usize, amt: isize) void {
+pub fn removeAndShift(a: *Array, low: isize, high: isize, amt: isize) void {
     {
         var i: usize = 0;
         while (i < a.slots.items.len) {

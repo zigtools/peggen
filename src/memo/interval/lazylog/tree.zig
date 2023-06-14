@@ -1,19 +1,19 @@
 const std = @import("std");
 const mem = std.mem;
 const lazytree = @import("../lazy/tree.zig");
-
 const Value = lazytree.Value;
+
 pub const Interval = struct {
-    low: usize,
-    high: usize,
+    low: isize,
+    high: isize,
     value: Value,
 
-    pub fn len(i: Interval) usize {
+    pub fn len(i: Interval) isize {
         return i.high - i.low;
     }
 
     // returns true if i overlaps with the interval [low:high)
-    pub fn overlaps(i: Interval, low: usize, high: usize) bool {
+    pub fn overlaps(i: Interval, low: isize, high: isize) bool {
         return i.low <= high and i.high >= low;
     }
 
@@ -28,40 +28,23 @@ pub const Interval = struct {
 /// intervals after idx by amt. Shifts are lazily applied in the tree to avoid
 /// linear time costs.
 pub const Shift = struct {
-    idx: usize,
+    idx: isize,
     amt: isize,
     tstamp: u64,
 };
 
 /// ShiftThreshold is the number of shifts to accumulate before applying all
 /// shifts.
-const ShiftThreshold = -1;
+const ShiftThreshold = 0;
 
 pub const Tree = struct {
-    root: ?*Node,
+    root: ?*Node = null,
     shifts: std.ArrayListUnmanaged(Shift) = .{},
     tstamp: u64 = 0, // most recent timestamp
 
-    pub inline fn init(allocator: mem.Allocator) !Tree {
-        const root = try allocator.create(Node);
-        root.* = .{
-            .key = Key.init(0, 0),
-            .max = 0,
-            .interval = .{},
-            .height = 0,
-            .left = null,
-            .right = null,
-            .tstamp = 0,
-            .tree = undefined,
-        };
-        var tree = Tree{ .root = root, .tstamp = 0 };
-        root.tree = &tree;
-        return tree;
-    }
-
     pub fn deinit(t: *Tree, allocator: mem.Allocator) void {
-        t.shifts.deinit(allocator);
         Node.deinit(t.root, allocator);
+        t.shifts.deinit(allocator);
     }
 
     pub fn format(t: Tree, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -78,7 +61,7 @@ pub const Tree = struct {
     // Adds the given interval to the tree. An id should also be given to the
     // interval to uniquely identify it if any other intervals begin at the same
     // location.
-    pub fn add(t: *Tree, allocator: mem.Allocator, id: usize, low: usize, high: usize, value: Value) !Value {
+    pub fn add(t: *Tree, allocator: mem.Allocator, id: usize, low: isize, high: isize, value: Value) !Value {
         std.debug.assert(low < high);
         const r_loc = try Node.add(
             t.root,
@@ -93,7 +76,7 @@ pub const Tree = struct {
 
     // Search for the interval starting at pos with the given id. Returns null if no
     // such interval exists.
-    pub fn findLargest(t: *Tree, allocator: mem.Allocator, id: usize, pos: usize) !?*Value {
+    pub fn findLargest(t: *Tree, allocator: mem.Allocator, id: usize, pos: isize) !?*Value {
         const n = try Node.search(t.root, allocator, Key{
             .pos = pos,
             .id = id,
@@ -112,7 +95,7 @@ pub const Tree = struct {
         return &n.interval.ins.items[max].value;
     }
 
-    pub fn removeAndShift(t: *Tree, allocator: mem.Allocator, low: usize, high: usize, amt: isize) !void {
+    pub fn removeAndShift(t: *Tree, allocator: mem.Allocator, low: isize, high: isize, amt: isize) !void {
         std.debug.assert(low < high);
         const tmp = t.root;
         t.root = try Node.removeOverlaps(tmp, allocator, low, high);
@@ -125,7 +108,7 @@ pub const Tree = struct {
     // lie inside an interval. This could conceivably be implemented, but is not
     // currently. If a negative shift is performed, ensure that there is space for
     // all intervals to be shifted left without overlapping with another interval.
-    fn shift(t: *Tree, allocator: mem.Allocator, idx: usize, amt: isize) !void {
+    fn shift(t: *Tree, allocator: mem.Allocator, idx: isize, amt: isize) !void {
         if (amt == 0) return;
 
         t.tstamp += 1;
@@ -134,14 +117,14 @@ pub const Tree = struct {
             .amt = amt,
             .tstamp = t.tstamp,
         });
-        if (ShiftThreshold != -1 and t.shifts.len >= ShiftThreshold) {
+        if (ShiftThreshold != -1 and t.shifts.items.len >= ShiftThreshold) {
             t.applyAllShifts();
         }
     }
 
     fn applyAllShifts(t: *Tree) void {
-        t.root.applyAllShifts();
-        t.shifts = null;
+        Node.applyAllShifts(t.root);
+        t.shifts.clearRetainingCapacity();
     }
 
     // Size returns the total number of intervals stored in the tree.
@@ -155,7 +138,7 @@ pub const Tree = struct {
 /// used for uniquely identifying a particular interval when searching or
 /// removing from the tree.
 pub const Key = struct {
-    pos: usize,
+    pos: isize,
     id: usize,
 
     pub fn init(pos: usize, id: usize) Key {
@@ -194,8 +177,8 @@ pub const LazyInterval = struct {
         i.ins.deinit(allocator);
     }
 
-    pub fn high(i: LazyInterval) usize {
-        var h: usize = 0;
+    pub fn high(i: LazyInterval) isize {
+        var h: isize = 0;
         for (i.ins.items) |in| {
             const inh = in.high;
             if (inh > h) h = inh;
@@ -203,7 +186,7 @@ pub const LazyInterval = struct {
         return h;
     }
 
-    pub fn shift(i: *LazyInterval, amt: usize) void {
+    pub fn shift(i: *LazyInterval, amt: isize) void {
         for (0..i.ins.items.len) |j| {
             i.ins.items[j].high += amt;
             i.ins.items[j].low += amt;
@@ -213,7 +196,7 @@ pub const LazyInterval = struct {
 
 pub const Node = struct {
     key: Key,
-    max: usize,
+    max: isize,
     interval: LazyInterval,
     tstamp: u64, // timestamp to determine which shifts to apply
     tree: *Tree,
@@ -354,15 +337,13 @@ pub const Node = struct {
             n;
     }
 
-    fn removeOverlaps(n_: ?*Node, allocator: mem.Allocator, low: usize, high: usize) !?*Node {
+    fn removeOverlaps(n_: ?*Node, allocator: mem.Allocator, low: isize, high: isize) !?*Node {
         var n = n_ orelse return n_;
-        applyShifts(n);
+        n.applyShifts();
 
         if (low > n.max) return n;
-        {
-            const tmp = n.left;
-            n.left = try removeOverlaps(tmp, allocator, low, high);
-        }
+
+        n.left = try removeOverlaps(n.left, allocator, low, high);
 
         var i: usize = 0;
         while (i < n.interval.ins.items.len) {
@@ -375,21 +356,17 @@ pub const Node = struct {
 
         if (n.interval.ins.items.len == 0) {
             const doright = high >= n.key.pos;
-            const tmp = n;
-            n = (try remove(tmp, allocator, n.key)) orelse return null;
+            n = (try n.remove(allocator, n.key)) orelse return null;
             if (doright) {
-                return removeOverlaps(n, allocator, low, high);
+                return n.removeOverlaps(allocator, low, high);
             }
             return n;
         }
 
-        if (high < n.key.pos) {
-            return n;
-        }
-        {
-            const tmp = n.right;
-            n.right = try removeOverlaps(tmp, allocator, low, high);
-        }
+        if (high < n.key.pos) return n;
+
+        n.right = try removeOverlaps(n.right, allocator, low, high);
+
         return n;
     }
 
@@ -500,7 +477,7 @@ pub const Node = struct {
         n.tstamp = s.tstamp;
         if (n.max < s.idx) return;
 
-        const amt = @intCast(usize, s.amt);
+        const amt = s.amt;
         n.max += amt;
         if (n.key.pos >= s.idx) {
             n.key.pos += amt;
@@ -531,25 +508,23 @@ pub const Node = struct {
             break :blk @bitCast(usize, j);
         };
         for (0..n.tree.shifts.items[j..].len) |i|
-            applyShift(n, n.tree.shifts.items[j + i]);
+            n.applyShift(n.tree.shifts.items[j + i]);
     }
 
-    fn applyAllShifts(n_: ?*Node, allocator: mem.Allocator) void {
-        _ = allocator;
+    fn applyAllShifts(n_: ?*Node) void {
         const n = n_ orelse return;
 
-        n.left.applyAllShifts();
-        n.right.applyAllShifts();
-        applyShifts(n);
+        Node.applyAllShifts(n.left);
+        Node.applyAllShifts(n.right);
+        n.applyShifts();
     }
 
-    fn eachNode(n_: ?*Node, allocator: mem.Allocator, f: fn (*Node) void) void {
-        _ = allocator;
+    fn eachNode(n_: ?*Node, f: fn (*Node) void) void {
         const n = n_ orelse return;
 
-        n.left.eachNode(f);
-        applyShifts(n);
+        eachNode(n.left, f);
+        n.applyShifts();
         f(n);
-        n.right.eachNode(f);
+        eachNode(n.right, f);
     }
 };
