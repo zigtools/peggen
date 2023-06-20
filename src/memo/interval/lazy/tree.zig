@@ -40,18 +40,18 @@ pub const IValue = struct {
 };
 
 pub const Value = union(enum) {
-    ivalue: IValue,
+    ivalue: *IValue,
     // ivalues: IValues,
-    lazy_interval: LazyInterval,
+    lazy_interval: *LazyInterval,
     entry: *memotree.Entry,
     none,
 
     pub fn init(p: anytype) Value {
         const P = @TypeOf(p);
         return switch (P) {
-            IValue => .{ .ivalue = p },
+            *IValue => .{ .ivalue = p },
             // IValues => .{ .ivalues = p },
-            LazyInterval => .{ .lazy_interval = p },
+            *LazyInterval => .{ .lazy_interval = p },
             *memotree.Entry => .{ .entry = p },
             else => @compileError("type '" ++ @typeName(P) ++ "' not supported."),
         };

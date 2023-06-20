@@ -1,7 +1,7 @@
 // An Array is another implementation of the interval.Set backed by an array
 // rather than an AVL tree. This implementation is naive and ineffecient, but
 // provides a good point of comparison for benchmarking and testing.
-slots: std.ArrayListUnmanaged(slot) = .{},
+slots: std.ArrayListUnmanaged(Slot) = .{},
 
 const std = @import("std");
 const mem = std.mem;
@@ -10,8 +10,8 @@ const tree = @import("tree.zig");
 const Interval = tree.Interval;
 pub const IValue = tree.IValue;
 
-const slot = struct {
-    ivalue: IValue,
+const Slot = struct {
+    ivalue: *IValue,
     id: usize,
 };
 
@@ -19,32 +19,39 @@ pub fn deinit(a: *Array, allocator: mem.Allocator) void {
     a.slots.deinit(allocator);
 }
 
-pub fn pos(iv: IValue) usize {
-    return iv.interval.Low;
+pub fn format(a: Array, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    _ = options;
+    _ = fmt;
+    try writer.print("Array{{ .slots={{.len={} }}}}\n", .{a.slots.items.len});
+    for (a.slots.items, 0..) |s, i|
+        try writer.print("  .slots[{}]={{.id={} .ivalue={}}}\n", .{ i, s.id, s.ivalue });
 }
 
-pub fn findLargest(a: Array, id: usize, pos_: isize) ?IValue {
+pub fn findLargest(a: Array, id: usize, pos: isize) ?*IValue {
     var max: isize = 0;
     var maxi: isize = -1;
     for (a.slots.items, 0..) |in, i| {
-        if (in.ivalue.interval.low == pos_ and in.id == id and in.ivalue.interval.high > max) {
+        if (in.ivalue.interval.low == pos and
+            in.id == id and
+            in.ivalue.interval.high > max)
+        {
             maxi = @intCast(isize, i);
             max = in.ivalue.interval.high;
         }
     }
-    if (maxi == -1 or maxi >= a.slots.items.len) {
+    if (maxi == -1 or maxi >= a.slots.items.len)
         return null;
-    }
 
     return a.slots.items[@bitCast(usize, maxi)].ivalue;
 }
 
 pub fn add(a: *Array, allocator: mem.Allocator, id: usize, low: isize, high: isize, val: usize) !tree.Value {
-    const iv = IValue{
+    const iv = try allocator.create(IValue);
+    iv.* = .{
         .interval = Interval.init(low, high),
         .value = val,
     };
-    try a.slots.append(allocator, slot{
+    try a.slots.append(allocator, .{
         .id = id,
         .ivalue = iv,
     });

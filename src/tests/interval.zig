@@ -34,9 +34,9 @@ pub fn main() !void {
     const alloc = arena.allocator();
     // const alloc = std.heap.c_allocator;
     // const alloc = t.allocator;
-    var it = Tree{};
+    var it = Array{};
     defer it.deinit(alloc);
-    var ia = Array{};
+    var ia = Tree{};
     defer ia.deinit(alloc);
     const nops = 300000;
     const maxidx = 10;
@@ -47,7 +47,7 @@ pub fn main() !void {
     var pa: lazytree.Value = .none;
     var length: isize = 0;
     var haspt: bool = false;
-    t.log_level = .debug;
+    // t.log_level = .info;
 
     for (0..nops) |i| {
         const op = rand.enumValue(Op);
@@ -57,30 +57,32 @@ pub fn main() !void {
                 const lowhigh = randrange(maxidx);
                 const low = lowhigh[0];
                 const high = lowhigh[1];
-                std.log.debug("=== {} op={s} {}:[{},{}]", .{ i, @tagName(op), id, low, high });
 
-                pt = try it.add(alloc, id, low, high, lazytree.Value.init((lazytree.IValue{ .value = i })));
-                pa = try ia.add(alloc, id, low, high, i);
+                pt = try it.add(alloc, id, low, high, i);
+                const iv = try alloc.create(lazytree.IValue);
+                iv.* = .{ .value = i };
+                pa = try ia.add(alloc, id, low, high, lazytree.Value.init(iv));
+                std.log.debug("=== {} op={s} {}:[{},{}] pt/pa.pos()=[{},{}]", .{ i, @tagName(op), id, low, high, pt.pos(), pa.pos() });
                 length = high - low;
                 haspt = true;
             },
             .find => {
                 const id = rand.intRangeAtMost(usize, 0, maxid);
                 const pos = rand.intRangeAtMost(isize, 0, maxidx);
-                std.log.debug("=== {} op={s} {}:{}", .{ i, @tagName(op), id, pos });
-
-                const vt = try it.findLargest(alloc, id, pos);
+                const vt = it.findLargest(id, pos);
                 const va = ia.findLargest(id, pos);
-
+                // std.log.debug("=== {} op={s} {}:{} va={?}/{?} vt={?}/{?}", .{ i, @tagName(op), id, pos, va, vaex, vt, vtex });
                 if (vt == null and va == null)
                     continue;
-                std.log.info("i={} vt={?} va={?}", .{ i, vt, va });
+                std.log.debug("i={} vt={?} va={?}", .{ i, vt, va });
                 if ((vt == null) != (va == null)) {
-                    std.log.err("Find1 ({}, {}): {?} != {?}", .{ id, pos, vt, va });
+                    std.log.err("find2 i={} ({}, {}): {?} != {?}", .{ i, id, pos, vt, va });
+                    std.debug.print("it=\n{}\n", .{it});
+                    std.debug.print("ia=\n{}\n", .{ia});
                     return error.TestUnexpectedResult;
                 }
-                if (vt.?.ivalue.value != va.?.value) {
-                    std.log.err("Find2 ({}, {}): {?} != {?}", .{ id, pos, vt.?.ivalue.value, va.?.value });
+                if (vt.?.value != va.?.ivalue.value) {
+                    std.log.err("find3 i={} ({}, {}): {?} != {?}", .{ i, id, pos, vt.?.value, va.?.ivalue.value });
                     return error.TestUnexpectedResult;
                 }
             },
@@ -99,16 +101,21 @@ pub fn main() !void {
                     }
                 }
                 std.log.debug("=== {} op={s} {}:[{},{}]", .{ i, @tagName(op), amt, low, high });
-                try it.removeAndShift(alloc, low, high, amt);
-                ia.removeAndShift(low, high, amt);
+                it.removeAndShift(low, high, amt);
+                try ia.removeAndShift(alloc, low, high, amt);
             },
             .pos => {
                 std.log.debug("=== {} op={s}", .{ i, @tagName(op) });
                 const post = pt.pos();
                 const posa = pa.pos();
-                if (haspt and post != posa) {
-                    std.log.err("i={} {} != {}", .{ i, post, posa });
-                    return error.TestUnexpectedResult;
+                if (haspt) {
+                    // std.log.debug("pt={} pa={}", .{ pt, pa });
+
+                    if (post != posa) {
+                        // if (post != postex) {
+                        std.log.err("i={} post {} != posa {}", .{ i, post, posa });
+                        return error.TestUnexpectedResult;
+                    }
                 }
             },
         }

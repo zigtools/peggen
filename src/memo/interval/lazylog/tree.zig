@@ -8,6 +8,8 @@ pub const Interval = struct {
     high: isize,
     value: Value,
 
+    pub const List = std.ArrayListUnmanaged(Interval);
+
     pub fn len(i: Interval) isize {
         return i.high - i.low;
     }
@@ -35,7 +37,7 @@ pub const Shift = struct {
 
 /// ShiftThreshold is the number of shifts to accumulate before applying all
 /// shifts.
-const ShiftThreshold = 0;
+const ShiftThreshold = -1;
 
 pub const Tree = struct {
     root: ?*Node = null,
@@ -48,14 +50,28 @@ pub const Tree = struct {
     }
 
     pub fn format(t: Tree, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print("Tree{{ .root={*} .shifts={{.len={} }}}}", .{ t.root, t.shifts.items.len });
+        // try writer.print("Tree{{ .root={*} .shifts={{", .{t.root});
+        // for (t.shifts.items, 0..) |sh, i| {
+        //     if (i != 0) _ = try writer.write(", ");
+        //     try writer.print("{}", .{sh});
+        // }
+        // _ = try writer.write("} }");
+        try t.dump(fmt, options, writer);
+    }
+    pub fn dump(t: Tree, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = options;
         _ = fmt;
-        try writer.print("Tree{{ .root={?} .shifts={{", .{t.root});
-        for (t.shifts.items, 0..) |sh, i| {
-            if (i != 0) _ = try writer.write(", ");
-            try writer.print("{}", .{sh});
-        }
-        _ = try writer.write("} }");
+        const E = error{};
+        const Ctx = @TypeOf(writer);
+        try writer.print("root={?}", .{t.root});
+        try Node.eachNode(t.root, Ctx, E, writer, struct {
+            fn func(mn: ?*Node, ctx: Ctx) E!void {
+                _ = ctx;
+                _ = mn;
+                unreachable;
+            }
+        }.func);
     }
 
     // Adds the given interval to the tree. An id should also be given to the
@@ -76,8 +92,8 @@ pub const Tree = struct {
 
     // Search for the interval starting at pos with the given id. Returns null if no
     // such interval exists.
-    pub fn findLargest(t: *Tree, allocator: mem.Allocator, id: usize, pos: isize) !?*Value {
-        const n = try Node.search(t.root, allocator, Key{
+    pub fn findLargest(t: *Tree, id: usize, pos: isize) ?Value {
+        const n = Node.search(t.root, Key{
             .pos = pos,
             .id = id,
         }) orelse return null;
@@ -86,19 +102,18 @@ pub const Tree = struct {
             return null;
 
         var max: usize = 0;
-        for (n.interval.ins.items[1..], 0..) |in, i| {
+        for (n.interval.ins.items[1..], 1..) |in, i| {
             if (in.len() > n.interval.ins.items[max].len()) {
-                max = i + 1;
+                max = i;
             }
         }
 
-        return &n.interval.ins.items[max].value;
+        return n.interval.ins.items[max].value;
     }
 
     pub fn removeAndShift(t: *Tree, allocator: mem.Allocator, low: isize, high: isize, amt: isize) !void {
         std.debug.assert(low < high);
-        const tmp = t.root;
-        t.root = try Node.removeOverlaps(tmp, allocator, low, high);
+        t.root = try Node.removeOverlaps(t.root, allocator, low, high);
         if (amt != 0) {
             try t.shift(allocator, low, amt);
         }
@@ -123,6 +138,7 @@ pub const Tree = struct {
     }
 
     fn applyAllShifts(t: *Tree) void {
+        std.log.debug("t.applyAllShifts() {any}", .{t.shifts.items});
         Node.applyAllShifts(t.root);
         t.shifts.clearRetainingCapacity();
     }
@@ -170,8 +186,8 @@ pub const Key = struct {
 };
 
 pub const LazyInterval = struct {
-    ins: std.ArrayListUnmanaged(Interval) = .{},
-    n: ?*Node = null,
+    ins: Interval.List = .{},
+    n: ?*Node,
 
     pub fn deinit(i: *LazyInterval, allocator: mem.Allocator) void {
         i.ins.deinit(allocator);
@@ -187,17 +203,20 @@ pub const LazyInterval = struct {
     }
 
     pub fn shift(i: *LazyInterval, amt: isize) void {
+        // std.log.debug("LazyInterval.shift() amt={}", .{amt});
         for (0..i.ins.items.len) |j| {
+            // std.log.debug("  i.ins.items[{}]={}", .{ j, i.ins.items[j] });
             i.ins.items[j].high += amt;
             i.ins.items[j].low += amt;
         }
+        std.log.debug("LazyInterval.shift() ins={any}", .{i.ins.items});
     }
 };
 
 pub const Node = struct {
     key: Key,
     max: isize,
-    interval: LazyInterval,
+    interval: *LazyInterval,
     tstamp: u64, // timestamp to determine which shifts to apply
     tree: *Tree,
 
@@ -206,11 +225,10 @@ pub const Node = struct {
     left: ?*Node,
     right: ?*Node,
 
-    pub fn deinit(n_: ?*Node, allocator: mem.Allocator) void {
-        const n = n_ orelse return;
+    pub fn deinit(mn: ?*Node, allocator: mem.Allocator) void {
+        const n = mn orelse return;
         if (n.right) |r| deinit(r, allocator);
         if (n.left) |l| deinit(l, allocator);
-        n.tree.deinit(allocator);
         n.interval.deinit(allocator);
         allocator.destroy(n);
         n.* = undefined;
@@ -223,52 +241,49 @@ pub const Node = struct {
     }
 
     // Adds a new node
-    pub fn add(n_: ?*Node, allocator: mem.Allocator, tree: *Tree, key: Key, value: Interval) !struct { ?*Node, LazyInterval } {
-        std.log.debug("lazylog.Node n=0x{x} add() key={} value={}", .{ @ptrToInt(n_), key, value });
-        const n = n_ orelse {
-            var nn = try allocator.create(Node);
+    pub fn add(mn: ?*Node, allocator: mem.Allocator, tree: *Tree, key: Key, interval: Interval) !struct { ?*Node, *LazyInterval } {
+        std.log.debug("lazylog.Node n=0x{x} add() key={} value={}", .{ @ptrToInt(mn), key, interval });
+        const n = mn orelse {
+            const nn = try allocator.create(Node);
+            var ins = try Interval.List.initCapacity(allocator, 1);
+            ins.appendAssumeCapacity(interval);
+            const lazy_interval = try allocator.create(LazyInterval);
+            lazy_interval.* = .{ .ins = ins, .n = nn };
             nn.* = Node{
                 .tree = tree,
                 .key = key,
-                .max = value.high,
+                .max = interval.high,
                 .height = 1,
                 .left = null,
                 .right = null,
                 .tstamp = tree.tstamp,
-                .interval = undefined,
+                .interval = lazy_interval,
             };
-            nn.interval = .{
-                .ins = .{},
-                .n = nn,
-            };
-            try nn.interval.ins.append(allocator, value);
             return .{ nn, nn.interval };
         };
         applyShifts(n);
 
-        var loc: LazyInterval = undefined;
         const cmp = key.compare(n.key);
         std.log.debug("{}.compare({})={}", .{ key, n.key, cmp });
-        if (cmp < 0) {
-            const l_loc = try Node.add(n.left, allocator, tree, key, value);
+        const loc = if (cmp < 0) loc: {
+            const l_loc = try Node.add(n.left, allocator, tree, key, interval);
             n.left = l_loc[0];
-            loc = l_loc[1];
-        } else if (cmp > 0) {
-            const r_loc = try Node.add(n.right, allocator, tree, key, value);
+            break :loc l_loc[1];
+        } else if (cmp > 0) loc: {
+            const r_loc = try Node.add(n.right, allocator, tree, key, interval);
             n.right = r_loc[0];
-            loc = r_loc[1];
-        } else {
+            break :loc r_loc[1];
+        } else loc: {
             // if same key exists update value
-            try n.interval.ins.append(allocator, value);
+            try n.interval.ins.append(allocator, interval);
             n.tstamp = tree.tstamp;
-            loc = n.interval;
-        }
-        return .{ Node.rebalanceTree(n), loc };
+            break :loc n.interval;
+        };
+        return .{ n.rebalanceTree(), loc };
     }
 
     fn updateMax(mn: ?*Node) void {
         const n = mn orelse return;
-        // if (mn) |n| {
         if (n.right) |right| {
             n.max = @max(n.max, right.max);
         }
@@ -276,13 +291,12 @@ pub const Node = struct {
             n.max = @max(n.max, left.max);
         }
         n.max = @max(n.max, n.interval.high());
-        // }
         std.log.debug("updateMax() n.max={}", .{n.max});
     }
 
     // Removes a node
-    fn remove(n_: ?*Node, allocator: mem.Allocator, key: Key) !?*Node {
-        var n = n_ orelse return null;
+    fn remove(mn: ?*Node, allocator: mem.Allocator, key: Key) !?*Node {
+        var n = mn orelse return null;
         applyShifts(n);
         if (key.compare(n.key) < 0) {
             n.left = try remove(n.left, allocator, key);
@@ -297,9 +311,7 @@ pub const Node = struct {
                 const right_min_node = findSmallest(n.right).?;
                 const rlen = right_min_node.interval.ins.items.len;
                 n.key = right_min_node.key;
-                if (n.interval.ins.items.len >= rlen) {
-                    try n.interval.ins.ensureTotalCapacity(allocator, rlen);
-                }
+                try n.interval.ins.ensureTotalCapacity(allocator, rlen);
                 n.interval.ins.items.len = rlen;
                 @memcpy(n.interval.ins.items, right_min_node.interval.ins.items);
 
@@ -317,7 +329,7 @@ pub const Node = struct {
                 n = n.right.?;
             } else {
                 // node has no children
-
+                // n.deinit(allocator);
                 return null;
             }
         }
@@ -325,20 +337,20 @@ pub const Node = struct {
     }
 
     // Searches for a node
-    fn search(n_: ?*Node, allocator: mem.Allocator, key: Key) !?*Node {
-        const n = n_ orelse return null;
+    fn search(mn: ?*Node, key: Key) ?*Node {
+        const n = mn orelse return null;
         applyShifts(n);
         const cmp = key.compare(n.key);
         return if (cmp < 0)
-            search(n.left, allocator, key)
+            search(n.left, key)
         else if (cmp > 0)
-            search(n.right, allocator, key)
+            search(n.right, key)
         else
             n;
     }
 
-    fn removeOverlaps(n_: ?*Node, allocator: mem.Allocator, low: isize, high: isize) !?*Node {
-        var n = n_ orelse return n_;
+    fn removeOverlaps(mn: ?*Node, allocator: mem.Allocator, low: isize, high: isize) !?*Node {
+        var n = mn orelse return mn;
         n.applyShifts();
 
         if (low > n.max) return n;
@@ -382,9 +394,9 @@ pub const Node = struct {
         return ((n orelse return 0).right orelse return 0).height;
     }
 
-    fn size(n_: ?*Node) usize {
-        const n = n_ orelse return 0;
-        return n.left.size() + n.right.size() + 1;
+    pub fn size(mn: ?*Node) usize {
+        const n = mn orelse return 0;
+        return size(n.left) + size(n.right) + n.interval.ins.items.len;
     }
 
     fn recalculateHeight(n: *Node) void {
@@ -392,9 +404,8 @@ pub const Node = struct {
     }
 
     // Checks if node is balanced and rebalance
-    fn rebalanceTree(n_: ?*Node) ?*Node {
-        std.log.debug("rebalanceTree(0x{x})", .{@ptrToInt(n_)});
-        const n = n_ orelse return n_;
+    fn rebalanceTree(n: *Node) ?*Node {
+        std.log.debug("rebalanceTree(0x{x})", .{@ptrToInt(n)});
 
         n.recalculateHeight();
         n.updateMax();
@@ -407,21 +418,21 @@ pub const Node = struct {
             if (getHeightLeft(n.right) > getHeightRight(n.right)) {
                 n.right = rotateRight(n.right);
             }
-            return rotateLeft(n);
+            return n.rotateLeft();
         } else if (balance_factor >= 2) {
             // check if child is right-heavy and rotateLeft first
             if (getHeightRight(n.left) > getHeightLeft(n.left)) {
                 n.left = rotateLeft(n.left);
             }
 
-            return rotateRight(n);
+            return n.rotateRight();
         }
         return n;
     }
 
     // Rotate nodes left to balance node
-    fn rotateLeft(n_: ?*Node) ?*Node {
-        const n = n_ orelse return n_;
+    fn rotateLeft(mn: ?*Node) ?*Node {
+        const n = mn orelse return mn;
         applyShifts(n);
         if (n.right != null) {
             applyShifts(n.right);
@@ -439,8 +450,8 @@ pub const Node = struct {
     }
 
     // Rotate nodes right to balance node
-    fn rotateRight(n_: ?*Node) ?*Node {
-        const n = n_ orelse return n_;
+    fn rotateRight(mn: ?*Node) ?*Node {
+        const n = mn orelse return mn;
         applyShifts(n);
         if (n.left) |left| {
             applyShifts(left);
@@ -458,8 +469,8 @@ pub const Node = struct {
     }
 
     // Finds the smallest child (based on the key) for the current node
-    fn findSmallest(n_: ?*Node) ?*Node {
-        const n = n_.?;
+    fn findSmallest(mn: ?*Node) ?*Node {
+        const n = mn.?;
         if (n.left != null) {
             applyShifts(n.left);
             return findSmallest(n.left);
@@ -469,6 +480,7 @@ pub const Node = struct {
     }
 
     fn applyShift(n: *Node, s: Shift) void {
+        std.log.info("n.applyShift() s={} n.tstamp={} n.max={}", .{ s, n.tstamp, n.max });
         if (n.tstamp >= s.tstamp) {
             // this shift is outdated and we have already applied it
             return;
@@ -483,11 +495,13 @@ pub const Node = struct {
             n.key.pos += amt;
             n.interval.shift(amt);
         }
+        std.log.debug("n.key.pos={}", .{n.key.pos});
         n.updateMax();
     }
 
-    pub fn applyShifts(n_: ?*Node) void {
-        const n = n_ orelse return;
+    pub fn applyShifts(mn: ?*Node) void {
+        const n = mn orelse return;
+        std.log.debug("Node.applyShifts() n.tree.shifts.len={} n.tstamp={}", .{ n.tree.shifts.items.len, n.tstamp });
         // optimization: first check if we are completely up-to-date and if so
         // there is nothing to do.
         if (n.tree.shifts.items.len == 0 or
@@ -511,20 +525,25 @@ pub const Node = struct {
             n.applyShift(n.tree.shifts.items[j + i]);
     }
 
-    fn applyAllShifts(n_: ?*Node) void {
-        const n = n_ orelse return;
-
+    fn applyAllShifts(mn: ?*Node) void {
+        const n = mn orelse return;
+        // std.log.debug("Node.applyAllShifts()", .{});
         Node.applyAllShifts(n.left);
         Node.applyAllShifts(n.right);
         n.applyShifts();
     }
 
-    fn eachNode(n_: ?*Node, f: fn (*Node) void) void {
-        const n = n_ orelse return;
-
-        eachNode(n.left, f);
+    pub fn eachNode(
+        mn: ?*Node,
+        comptime Ctx: type,
+        comptime Err: type,
+        ctx: Ctx,
+        comptime f: fn (?*Node, Ctx) Err!void,
+    ) Err!void {
+        const n = mn orelse return;
+        try eachNode(n.left, Ctx, Err, ctx, f);
         n.applyShifts();
-        f(n);
-        eachNode(n.right, f);
+        try f(n, ctx);
+        try eachNode(n.right, Ctx, Err, ctx, f);
     }
 };

@@ -237,6 +237,7 @@ pub const TreeTable = struct {
 
         const examined = @max(examined_, length);
 
+        t.lock.lock();
         var entry = try allocator.create(Entry);
         entry.* = .{
             .length = length,
@@ -245,8 +246,7 @@ pub const TreeTable = struct {
             .captures = capt,
             .pos = 0,
         };
-        t.lock.lock();
-        const pos = try t.add(allocator, id, start, start + examined, entry);
+        const pos = try t.add(allocator, id, start, start + examined, .{ .entry = entry });
         entry.setPos(pos);
         t.lock.unlock();
     }
@@ -254,13 +254,13 @@ pub const TreeTable = struct {
     // Adds the given interval to the tree. An id should also be given to the
     // interval to uniquely identify it if any other intervals begin at the same
     // location.
-    pub fn add(t: *TreeTable, allocator: mem.Allocator, id: usize, low: isize, high: isize, value: *Entry) !Value {
+    pub fn add(t: *TreeTable, allocator: mem.Allocator, id: usize, low: isize, high: isize, value: Value) !Value {
         const node_loc = try Node.add(
             t.tree.root,
             allocator,
             &t.tree,
             .{ .pos = low, .id = id },
-            .{ .low = low, .high = high, .value = Value.init(value) },
+            .{ .low = low, .high = high, .value = value },
         );
         t.tree.root = node_loc[0];
         return .{ .lazy_interval = node_loc[1] };

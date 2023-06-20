@@ -324,7 +324,7 @@ pub fn compile(p: Pattern, allocator: mem.Allocator) Error!Program {
                 try code.append(allocator, Insn.init(.capture_late, .{ .back = back, .id = n.id }));
             }
             try code.appendSlice(allocator, sub.items[i..]);
-            try code.append(allocator, Insn.init(.capture_end, undefined));
+            try code.append(allocator, Insn.init(.capture_end, @as(usize, undefined)));
             return code;
         },
         .no_cap => |n| {
