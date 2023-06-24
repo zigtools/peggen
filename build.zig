@@ -27,8 +27,18 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = optimize,
     });
+
     const test_step = b.step("test", "Run unit tests");
     const test_run = b.addRunArtifact(exe_tests);
     test_run.has_side_effects = true;
     test_step.dependOn(&test_run.step);
+
+    const interval_test_exe = b.addExecutable(.{
+        .name = "interval-test",
+        .root_source_file = .{ .path = "src/tests/interval.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    interval_test_exe.main_pkg_path = ".";
+    b.installArtifact(interval_test_exe);
 }
