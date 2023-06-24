@@ -279,7 +279,7 @@ pub const BaseInsn = enum(u8) {
     none,
 
     pub fn from(byte: u8) BaseInsn {
-        return @intToEnum(BaseInsn, byte);
+        return @enumFromInt(BaseInsn, byte);
     }
 
     pub fn fromInsn(insn: isa.Insn) BaseInsn {
@@ -324,7 +324,7 @@ pub const BaseInsn = enum(u8) {
     }
 
     fn code(i: BaseInsn) u8 {
-        return @enumToInt(i);
+        return @intFromEnum(i);
     }
 };
 
@@ -514,7 +514,7 @@ fn encodeLabel(x: usize) [3]u8 {
 }
 
 fn encodeBool(b: bool) u8 {
-    return @boolToInt(b);
+    return @intFromBool(b);
 }
 
 // Adds the set to the code's list of charsets, and returns the index it was
@@ -547,7 +547,7 @@ fn addChecker(code: *Vm, allocator: mem.Allocator, checker: isa.Checker) !usize 
 }
 
 fn sz(i: BaseInsn) u8 {
-    return insn_sizes[@enumToInt(i)];
+    return insn_sizes[@intFromEnum(i)];
 }
 
 pub const insn_sizes = std.enums.directEnumArray(BaseInsn, u8, 0, .{

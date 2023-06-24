@@ -50,7 +50,7 @@ pub const Expression = struct {
                     (quoted[0] == '"' and quoted[quoted.len - 1] == '"'));
                 return .{
                     .slice = quoted[1 .. quoted.len - 1],
-                    .quote_kind = @intToEnum(QuoteKind, quoted[0]),
+                    .quote_kind = @enumFromInt(QuoteKind, quoted[0]),
                 };
             }
         };
@@ -211,7 +211,7 @@ pub const Expression = struct {
                     var buf: [16]u8 = undefined;
                     // trim off leading '[^' and trailing ']'
                     const input =
-                        set.values[1 + @as(u8, @boolToInt(set.kind == .negative)) .. set.values.len - 1];
+                        set.values[1 + @as(u8, @intFromBool(set.kind == .negative)) .. set.values.len - 1];
 
                     // need to separate the range by '-' but not '\-' and the
                     // 'range' parser doesn't accept non-printable ascii

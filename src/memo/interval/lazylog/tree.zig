@@ -242,7 +242,7 @@ pub const Node = struct {
 
     // Adds a new node
     pub fn add(mn: ?*Node, allocator: mem.Allocator, tree: *Tree, key: Key, interval: Interval) !struct { ?*Node, *LazyInterval } {
-        std.log.debug("lazylog.Node n=0x{x} add() key={} value={}", .{ @ptrToInt(mn), key, interval });
+        std.log.debug("lazylog.Node n=0x{x} add() key={} value={}", .{ @intFromPtr(mn), key, interval });
         const n = mn orelse {
             const nn = try allocator.create(Node);
             var ins = try Interval.List.initCapacity(allocator, 1);
@@ -405,7 +405,7 @@ pub const Node = struct {
 
     // Checks if node is balanced and rebalance
     fn rebalanceTree(n: *Node) ?*Node {
-        std.log.debug("rebalanceTree(0x{x})", .{@ptrToInt(n)});
+        std.log.debug("rebalanceTree(0x{x})", .{@intFromPtr(n)});
 
         n.recalculateHeight();
         n.updateMax();
@@ -480,7 +480,7 @@ pub const Node = struct {
     }
 
     fn applyShift(n: *Node, s: Shift) void {
-        std.log.info("n.applyShift() s={} n.tstamp={} n.max={}", .{ s, n.tstamp, n.max });
+        // std.log.info("n.applyShift() s={} n.tstamp={} n.max={}", .{ s, n.tstamp, n.max });
         if (n.tstamp >= s.tstamp) {
             // this shift is outdated and we have already applied it
             return;

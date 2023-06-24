@@ -213,7 +213,7 @@ pub const TreeTable = struct {
     pub fn applyEdit(t: *TreeTable, allocator: mem.Allocator, e: Edit) !void {
         const low = e.start;
         var high = e.end;
-        high += @boolToInt(low == high);
+        high += @intFromBool(low == high);
 
         const amt = e.len - (e.end - e.start);
 

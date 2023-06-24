@@ -231,7 +231,7 @@ pub const Ref = enum(u8) {
     block,
 
     pub fn code(r: Ref) u8 {
-        return @enumToInt(r);
+        return @intFromEnum(r);
     }
 };
 
@@ -252,7 +252,7 @@ pub const BackReference = struct {
     pub fn check(self: ?*anyopaque, b: []const u8, src_: ?*anyopaque, id: u32, flag: u32) isize {
         const r = @ptrCast(*BackReference, @alignCast(@alignOf(*BackReference), self));
         const src = @ptrCast(*Input, @alignCast(@alignOf(*Input), src_));
-        switch (@intToEnum(Ref, @intCast(u8, flag))) {
+        switch (@enumFromInt(Ref, @intCast(u8, flag))) {
             .def => {
                 // std.log.debug("BackReference.check() Def b={s}", .{b});
                 const duped = r.allocator.dupe(u8, b) catch |e|

@@ -21,7 +21,7 @@ pub const Context = struct {
         var line_start: usize = 0;
         for (stream.input[0..stream.index], 0..) |c, i| {
             const is_nl = c == '\n';
-            line += @boolToInt(is_nl);
+            line += @intFromBool(is_nl);
             if (is_nl) {
                 line_start = i + 1;
                 col = 1;
